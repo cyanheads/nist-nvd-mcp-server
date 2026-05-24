@@ -1,7 +1,7 @@
 {
-  "name": "nist-nvd-mcp-server",
+  "name": "@cyanheads/nist-nvd-mcp-server",
   "mcpName": "io.github.cyanheads/nist-nvd-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
@@ -30,7 +30,7 @@
     "format": "biome check --write --unsafe .",
     "lint:mcp": "tsx scripts/lint-mcp.ts",
     "lint:packaging": "tsx scripts/lint-packaging.ts",
-    "bundle": "npm run build && npx -y @anthropic-ai/mcpb pack . dist/nist-nvd-mcp-server.mcpb",
+    "bundle": "bun run build && npx -y @anthropic-ai/mcpb pack . dist/nist-nvd-mcp-server.mcpb",
     "changelog:build": "tsx scripts/build-changelog.ts",
     "changelog:check": "tsx scripts/build-changelog.ts --check",
     "test": "vitest run",
@@ -64,7 +64,7 @@
   "bugs": {
     "url": "https://github.com/cyanheads/nist-nvd-mcp-server/issues"
   },
-  "author": "Casey Hand <casey@caseyjhand.com> (https://github.com/cyanheads)",
+  "author": "cyanheads <casey@caseyjhand.com> (https://github.com/cyanheads/nist-nvd-mcp-server#readme)",
   "license": "Apache-2.0",
   "engines": {
     "bun": ">=1.3.0",
