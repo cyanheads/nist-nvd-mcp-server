@@ -136,8 +136,9 @@ export class NvdHttpClient {
         }
 
         if (response.status === 404) {
-          // NVD returns 404 for malformed CVE IDs (empty body)
-          throw new Error('NVD returned HTTP 404 — likely a malformed CVE ID format.');
+          // NVD returns 404 for malformed/invalid request parameters.
+          // Callers translate this to domain-appropriate errors via catch blocks.
+          throw new Error('NVD returned HTTP 404.');
         }
 
         if (!response.ok) {

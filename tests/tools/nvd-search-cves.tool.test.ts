@@ -177,4 +177,81 @@ describe('nvdSearchCves', () => {
     expect(text).toContain('Not available');
     expect(text).not.toMatch(/Severity:.*undefined/);
   });
+
+  it('throws missing_date_pair when only pubStartDate is provided', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ pubStartDate: '2024-01-01T00:00:00.000Z' });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'missing_date_pair' },
+    });
+  });
+
+  it('throws missing_date_pair when only pubEndDate is provided', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ pubEndDate: '2024-01-31T00:00:00.000Z' });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'missing_date_pair' },
+    });
+  });
+
+  it('throws missing_date_pair when only lastModStartDate is provided', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ lastModStartDate: '2024-01-01T00:00:00.000Z' });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'missing_date_pair' },
+    });
+  });
+
+  it('throws date_range_inverted when pubEndDate is before pubStartDate', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      pubStartDate: '2024-06-01T00:00:00.000Z',
+      pubEndDate: '2024-01-01T00:00:00.000Z',
+    });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'date_range_inverted' },
+    });
+  });
+
+  it('throws date_range_inverted when lastModEndDate is before lastModStartDate', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      lastModStartDate: '2024-06-01T00:00:00.000Z',
+      lastModEndDate: '2024-01-01T00:00:00.000Z',
+    });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'date_range_inverted' },
+    });
+  });
+
+  it('daysAgo/nowIso produce parseable ISO 8601 dates (forwarded to service)', async () => {
+    // Capture what date strings get passed to the service when pubDays is used
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ pubDays: 30 });
+    await nvdSearchCves.handler(input, ctx);
+
+    const call = mockService.searchCves.mock.calls[0][0] as Record<string, unknown>;
+    const startDate = new Date(call.pubStartDate as string);
+    const endDate = new Date(call.pubEndDate as string);
+    expect(Number.isNaN(startDate.getTime())).toBe(false);
+    expect(Number.isNaN(endDate.getTime())).toBe(false);
+  });
+
+  it('mutually_exclusive_params for lastModDays conflict includes lastMod-specific recovery hint', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      lastModDays: 30,
+      lastModStartDate: '2024-01-01T00:00:00.000Z',
+      lastModEndDate: '2024-01-30T00:00:00.000Z',
+    });
+    try {
+      await nvdSearchCves.handler(input, ctx);
+      expect.fail('should have thrown');
+    } catch (err) {
+      const mcpErr = err as { data?: { reason?: string; recovery?: { hint?: string } } };
+      expect(mcpErr.data?.reason).toBe('mutually_exclusive_params');
+      expect(mcpErr.data?.recovery?.hint).toContain('lastModDays');
+    }
+  });
 });

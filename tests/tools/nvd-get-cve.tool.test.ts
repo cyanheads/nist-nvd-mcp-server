@@ -73,6 +73,7 @@ describe('nvdGetCve', () => {
       cves: [FULL_CVE],
       returned: 1,
       requested: 1,
+      missingIds: [],
     });
     const ctx = createMockContext();
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
@@ -82,6 +83,7 @@ describe('nvdGetCve', () => {
     expect(result.cves).toHaveLength(1);
     expect(result.queryMeta.requested).toBe(1);
     expect(result.queryMeta.returned).toBe(1);
+    expect(result.queryMeta.missingIds).toBeUndefined();
   });
 
   it('returns brief records when brief: true', async () => {
@@ -89,6 +91,7 @@ describe('nvdGetCve', () => {
       cves: [FULL_CVE],
       returned: 1,
       requested: 1,
+      missingIds: [],
     });
     const ctx = createMockContext();
     const input = nvdGetCve.input.parse({ cveIds: ['CVE-2021-44228'], brief: true });
@@ -109,6 +112,7 @@ describe('nvdGetCve', () => {
       cves: [FULL_CVE, SPARSE_CVE],
       returned: 2,
       requested: 2,
+      missingIds: [],
     });
     const ctx = createMockContext();
     const input = nvdGetCve.input.parse({ cveIds: ['CVE-2021-44228', 'CVE-2022-00001'] });
@@ -135,6 +139,7 @@ describe('nvdGetCve', () => {
       cves: [SPARSE_CVE],
       returned: 1,
       requested: 1,
+      missingIds: [],
     });
     const ctx = createMockContext();
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2022-00001', brief: true });
@@ -142,6 +147,29 @@ describe('nvdGetCve', () => {
 
     const cve = result.cves[0] as { severity?: unknown };
     expect(cve.severity).toBeUndefined();
+  });
+
+  it('exposes missingIds in queryMeta for partial batch results', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [FULL_CVE],
+      returned: 1,
+      requested: 2,
+      missingIds: ['CVE-2099-99999'],
+    });
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
+    const input = nvdGetCve.input.parse({
+      cveIds: ['CVE-2021-44228', 'CVE-2099-99999'],
+      brief: true,
+    });
+    const result = await nvdGetCve.handler(input, ctx);
+
+    expect(result.queryMeta.missingIds).toEqual(['CVE-2099-99999']);
+    expect(result.queryMeta.returned).toBe(1);
+    expect(result.queryMeta.requested).toBe(2);
+  });
+
+  it('rejects empty cveIds array at schema parse', () => {
+    expect(() => nvdGetCve.input.parse({ cveIds: [] })).toThrow();
   });
 
   it('formats full CVE output with key fields', () => {

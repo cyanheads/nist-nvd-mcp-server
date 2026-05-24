@@ -18,16 +18,16 @@ function parseDate(dateStr: string, fieldName: string): Date {
   return d;
 }
 
-/** Returns the date N days ago from now as ISO 8601 string. */
+/** Returns the date N days ago from now as ISO 8601 string (milliseconds zeroed, UTC). */
 function daysAgo(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return d.toISOString().replace(/\.\d{3}Z$/, '000 UTC+00:00');
+  return d.toISOString().replace(/\.\d{3}Z$/, '.000Z');
 }
 
-/** Returns now as ISO 8601 string. */
+/** Returns the current datetime as ISO 8601 string (milliseconds zeroed, UTC). */
 function nowIso(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, '000 UTC+00:00');
+  return new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z');
 }
 
 const BriefCveRecordSchema = z.object({
@@ -178,6 +178,19 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         'Use either the convenience shorthand (pubDays) or the explicit date range (pubStartDate + pubEndDate), not both.',
     },
     {
+      reason: 'missing_date_pair',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Only one of pubStartDate/pubEndDate (or lastModStartDate/lastModEndDate) was provided — NVD requires both.',
+      recovery:
+        'Provide both the start and end date, or use pubDays/lastModDays instead of an explicit date range.',
+    },
+    {
+      reason: 'date_range_inverted',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The end date is before the start date.',
+      recovery: 'Ensure the end date is after the start date.',
+    },
+    {
       reason: 'date_range_exceeds_max',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Explicit pubStartDate/pubEndDate or lastModStartDate/lastModEndDate span more than 120 days.',
@@ -216,9 +229,37 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         'mutually_exclusive_params',
         'lastModDays and lastModStartDate/lastModEndDate are mutually exclusive.',
         {
-          ...ctx.recoveryFor('mutually_exclusive_params'),
+          recovery: {
+            hint: 'Use either the convenience shorthand (lastModDays) or the explicit date range (lastModStartDate + lastModEndDate), not both.',
+          },
         },
       );
+    }
+
+    // Validate co-requirement: start and end must be provided together.
+    if (input.pubStartDate && !input.pubEndDate) {
+      throw ctx.fail('missing_date_pair', 'pubStartDate requires pubEndDate.', {
+        ...ctx.recoveryFor('missing_date_pair'),
+      });
+    }
+    if (input.pubEndDate && !input.pubStartDate) {
+      throw ctx.fail('missing_date_pair', 'pubEndDate requires pubStartDate.', {
+        ...ctx.recoveryFor('missing_date_pair'),
+      });
+    }
+    if (input.lastModStartDate && !input.lastModEndDate) {
+      throw ctx.fail('missing_date_pair', 'lastModStartDate requires lastModEndDate.', {
+        recovery: {
+          hint: 'Provide both the start and end date, or use lastModDays instead of an explicit date range.',
+        },
+      });
+    }
+    if (input.lastModEndDate && !input.lastModStartDate) {
+      throw ctx.fail('missing_date_pair', 'lastModEndDate requires lastModStartDate.', {
+        recovery: {
+          hint: 'Provide both the start and end date, or use lastModDays instead of an explicit date range.',
+        },
+      });
     }
 
     const datesClamped: Array<{ param: string; original: number; clamped: number }> = [];
@@ -260,6 +301,15 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       const start = parseDate(pubStartDate, 'pubStartDate');
       const end = parseDate(pubEndDate, 'pubEndDate');
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+      if (days < 0) {
+        throw ctx.fail(
+          'date_range_inverted',
+          'pubEndDate is before pubStartDate — the date range is inverted.',
+          {
+            ...ctx.recoveryFor('date_range_inverted'),
+          },
+        );
+      }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',
@@ -275,6 +325,15 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       const start = parseDate(lastModStartDate, 'lastModStartDate');
       const end = parseDate(lastModEndDate, 'lastModEndDate');
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+      if (days < 0) {
+        throw ctx.fail(
+          'date_range_inverted',
+          'lastModEndDate is before lastModStartDate — the date range is inverted.',
+          {
+            ...ctx.recoveryFor('date_range_inverted'),
+          },
+        );
+      }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',

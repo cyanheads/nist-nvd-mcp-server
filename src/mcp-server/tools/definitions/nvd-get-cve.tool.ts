@@ -22,7 +22,11 @@ export const nvdGetCve = tool('nvd_get_cve', {
     cveIds: z
       .union([
         z.string().describe('A single CVE ID (e.g., "CVE-2021-44228").'),
-        z.array(z.string()).max(100).describe('An array of CVE IDs — up to 100 per call.'),
+        z
+          .array(z.string())
+          .min(1)
+          .max(100)
+          .describe('An array of CVE IDs — at least 1, up to 100 per call.'),
       ])
       .describe('One CVE ID or an array of up to 100 CVE IDs to fetch.'),
     brief: z
@@ -60,6 +64,12 @@ export const nvdGetCve = tool('nvd_get_cve', {
       .object({
         requested: z.number().describe('Number of CVE IDs requested.'),
         returned: z.number().describe('Number of CVE records returned.'),
+        missingIds: z
+          .array(z.string().describe('A CVE ID not found in NVD.'))
+          .optional()
+          .describe(
+            'CVE IDs that were requested but returned no NVD data. Absent when all IDs matched.',
+          ),
       })
       .describe('Count metadata for verifying ID-to-record parity.'),
   }),
@@ -94,6 +104,9 @@ export const nvdGetCve = tool('nvd_get_cve', {
     const service = getNvdCveService();
     const result = await service.fetchById(ids, input.includeReferences, ctx);
 
+    const missingIds =
+      result.missingIds && result.missingIds.length > 0 ? result.missingIds : undefined;
+
     if (input.brief) {
       return {
         brief: true,
@@ -104,14 +117,22 @@ export const nvdGetCve = tool('nvd_get_cve', {
           ...(cve.severity ? { severity: cve.severity } : {}),
           ...(cve.cisaKev ? { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName } : {}),
         })) as Record<string, unknown>[],
-        queryMeta: { requested: result.requested, returned: result.returned },
+        queryMeta: {
+          requested: result.requested,
+          returned: result.returned,
+          ...(missingIds ? { missingIds } : {}),
+        },
       };
     }
 
     return {
       brief: false,
       cves: result.cves as unknown as Record<string, unknown>[],
-      queryMeta: { requested: result.requested, returned: result.returned },
+      queryMeta: {
+        requested: result.requested,
+        returned: result.returned,
+        ...(missingIds ? { missingIds } : {}),
+      },
     };
   },
 
@@ -120,6 +141,9 @@ export const nvdGetCve = tool('nvd_get_cve', {
     lines.push(
       `**Returned:** ${result.queryMeta.returned} / ${result.queryMeta.requested} requested`,
     );
+    if (result.queryMeta.missingIds && result.queryMeta.missingIds.length > 0) {
+      lines.push(`**Not found in NVD:** ${result.queryMeta.missingIds.join(', ')}`);
+    }
     lines.push(`**Mode:** ${result.brief ? 'Brief' : 'Full'}\n`);
 
     for (const rawCve of result.cves) {
