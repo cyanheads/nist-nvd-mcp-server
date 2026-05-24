@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -60,36 +47,54 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getNvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const nvdSearchCpes = tool('nvd_search_cpes', {
+  title: 'Search CPE Dictionary',
+  description: 'Search the NVD CPE dictionary by product keyword or partial match string.',
+  annotations: { readOnlyHint: true, openWorldHint: false },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    keyword: z.string().optional().describe('Product keyword (e.g., "apache http server").'),
+    cpeMatchString: z.string().optional().describe('Partial CPEv2.3 pattern.'),
+    limit: z.number().int().min(1).max(10_000).default(20).describe('Max results (default 20, max 10000).'),
   }),
+
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    cpes: z.array(z.object({
+      cpeName: z.string().describe('Full CPEv2.3 name.'),
+      title: z.string().optional().describe('Human-readable title.'),
+      deprecated: z.boolean().describe('Whether this CPE is deprecated.'),
+    })).describe('Matching CPE dictionary entries.'),
+    queryMeta: z.object({
+      totalResults: z.number().describe('Total matches before limit.'),
+      returned: z.number().describe('Entries returned.'),
+    }).describe('Pagination metadata.'),
   }),
-  auth: ['inventory:read'],
+
+  errors: [
+    {
+      reason: 'missing_search_input',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Neither keyword nor cpeMatchString was provided.',
+      recovery: 'Provide at least one of keyword or cpeMatchString.',
+    },
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    if (!input.keyword && !input.cpeMatchString) {
+      throw ctx.fail('missing_search_input', 'At least one of keyword or cpeMatchString is required.', {
+        ...ctx.recoveryFor('missing_search_input'),
+      });
+    }
+    ctx.log.info('Searching CPE dictionary', { keyword: input.keyword, limit: input.limit });
+    const service = getNvdCpeService();
+    const result = await service.searchCpes({ keyword: input.keyword, cpeMatchString: input.cpeMatchString, limit: input.limit }, ctx);
+    return { cpes: result.cpes, queryMeta: { totalResults: result.totalResults, returned: result.returned } };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: result.cpes.map(c => `**${c.title ?? c.cpeName}**: \`${c.cpeName}\``).join('\n') }],
 });
 ```
 
@@ -97,34 +102,30 @@ export const searchItems = tool('search_items', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
+const CVE_ID_REGEX = /^CVE-\d{4}-\d{4,}$/i;
 
-### Prompt
+export const nvdCveResource = resource('nvd://cve/{cveId}', {
+  name: 'NVD CVE Record',
+  description: 'Fetch a single CVE record by ID — stable URI for injectable context.',
+  mimeType: 'application/json',
 
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+  params: z.object({
+    cveId: z.string().describe('CVE identifier (e.g., "CVE-2021-44228").'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+
+  async handler(params, ctx) {
+    if (!CVE_ID_REGEX.test(params.cveId)) {
+      throw validationError(`Invalid CVE ID format: "${params.cveId}". Expected: CVE-YYYY-NNNNN.`, { cveId: params.cveId });
+    }
+    ctx.log.debug('Fetching CVE resource', { cveId: params.cveId });
+    const service = getNvdCveService();
+    const result = await service.fetchById([params.cveId.toUpperCase()], true, ctx);
+    if (result.cves.length === 0) throw notFound(`CVE ${params.cveId} not found.`, { cveId: params.cveId });
+    return result.cves[0];
+  },
 });
 ```
 
@@ -136,15 +137,15 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  apiKey: z.string().optional().describe('NIST NVD API key.'),
+  requestTimeoutMs: z.coerce.number().default(10_000).describe('HTTP request timeout in ms.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    apiKey: 'NVD_API_KEY',
+    requestTimeoutMs: 'NVD_REQUEST_TIMEOUT_MS',
   });
   return _config;
 }
@@ -162,10 +163,7 @@ Handlers receive a unified `ctx` object. Key properties:
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
+| `ctx.signal` | `AbortSignal` for cancellation. Forwarded to NVD HTTP requests. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
@@ -219,18 +217,25 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # NVD_API_KEY + NVD_REQUEST_TIMEOUT_MS (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    nvd-http/
+      nvd-http-client.ts               # HTTP client with token-bucket rate limiting and retry
+    nvd-cve/
+      nvd-cve-service.ts               # CVE search, fetch-by-ID, CPE audit, history, normalization
+      types.ts                          # Raw API response + normalized domain types
+    nvd-cpe/
+      nvd-cpe-service.ts               # CPE dictionary search and normalization
+      types.ts                          # Raw CPE response + normalized CpeRecord
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      nvd-search-cves.tool.ts           # nvd_search_cves
+      nvd-get-cve.tool.ts              # nvd_get_cve
+      nvd-search-cpes.tool.ts          # nvd_search_cpes
+      nvd-audit-cpe.tool.ts            # nvd_audit_cpe
+      nvd-get-cve-history.tool.ts      # nvd_get_cve_history
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      nvd-cve.resource.ts              # nvd://cve/{cveId}
 ```
 
 ---

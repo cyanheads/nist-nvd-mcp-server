@@ -104,8 +104,12 @@ export const nvdGetCve = tool('nvd_get_cve', {
     const service = getNvdCveService();
     const result = await service.fetchById(ids, input.includeReferences, ctx);
 
-    const missingIds =
-      result.missingIds && result.missingIds.length > 0 ? result.missingIds : undefined;
+    const missingIds = result.missingIds.length > 0 ? result.missingIds : undefined;
+    const queryMeta = {
+      requested: result.requested,
+      returned: result.returned,
+      ...(missingIds ? { missingIds } : {}),
+    };
 
     if (input.brief) {
       return {
@@ -117,22 +121,14 @@ export const nvdGetCve = tool('nvd_get_cve', {
           ...(cve.severity ? { severity: cve.severity } : {}),
           ...(cve.cisaKev ? { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName } : {}),
         })) as Record<string, unknown>[],
-        queryMeta: {
-          requested: result.requested,
-          returned: result.returned,
-          ...(missingIds ? { missingIds } : {}),
-        },
+        queryMeta,
       };
     }
 
     return {
       brief: false,
       cves: result.cves as unknown as Record<string, unknown>[],
-      queryMeta: {
-        requested: result.requested,
-        returned: result.returned,
-        ...(missingIds ? { missingIds } : {}),
-      },
+      queryMeta,
     };
   },
 

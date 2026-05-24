@@ -1,0 +1,165 @@
+# nist-nvd-mcp-server - Directory Structure
+
+Generated on: 2026-05-24 13:11:03
+
+```text
+nist-nvd-mcp-server/
+├── .github/
+│   └── ISSUE_TEMPLATE/
+│       ├── bug_report.yml
+│       ├── config.yml
+│       └── feature_request.yml
+├── .vscode/
+│   ├── extensions.json
+│   └── settings.json
+├── changelog/
+│   ├── 0.1.x/
+│   └── template.md
+├── docs/
+│   ├── design.md
+│   └── idea.md
+├── scripts/
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skills-sync.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   └── tree.ts
+├── skills/
+│   ├── add-app-tool/
+│   │   └── SKILL.md
+│   ├── add-prompt/
+│   │   └── SKILL.md
+│   ├── add-resource/
+│   │   └── SKILL.md
+│   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-test/
+│   │   └── SKILL.md
+│   ├── add-tool/
+│   │   └── SKILL.md
+│   ├── api-auth/
+│   │   └── SKILL.md
+│   ├── api-canvas/
+│   │   └── SKILL.md
+│   ├── api-config/
+│   │   └── SKILL.md
+│   ├── api-context/
+│   │   └── SKILL.md
+│   ├── api-errors/
+│   │   └── SKILL.md
+│   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-services/
+│   │   ├── references/
+│   │   │   ├── graph.md
+│   │   │   ├── llm.md
+│   │   │   └── speech.md
+│   │   └── SKILL.md
+│   ├── api-telemetry/
+│   │   └── SKILL.md
+│   ├── api-testing/
+│   │   └── SKILL.md
+│   ├── api-utils/
+│   │   ├── references/
+│   │   │   ├── formatting.md
+│   │   │   ├── parsing.md
+│   │   │   └── security.md
+│   │   └── SKILL.md
+│   ├── api-workers/
+│   │   └── SKILL.md
+│   ├── design-mcp-server/
+│   │   └── SKILL.md
+│   ├── field-test/
+│   │   └── SKILL.md
+│   ├── git-wrapup/
+│   │   └── SKILL.md
+│   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── migrate-mcp-ts-template/
+│   │   └── SKILL.md
+│   ├── polish-docs-meta/
+│   │   ├── references/
+│   │   │   ├── agent-protocol.md
+│   │   │   ├── package-meta.md
+│   │   │   ├── readme.md
+│   │   │   └── server-json.md
+│   │   └── SKILL.md
+│   ├── release-and-publish/
+│   │   └── SKILL.md
+│   ├── report-issue-framework/
+│   │   └── SKILL.md
+│   ├── report-issue-local/
+│   │   └── SKILL.md
+│   ├── security-pass/
+│   │   └── SKILL.md
+│   ├── setup/
+│   │   └── SKILL.md
+│   └── tool-defs-analysis/
+│       └── SKILL.md
+├── src/
+│   ├── config/
+│   │   └── server-config.ts
+│   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   └── definitions/
+│   │   ├── resources/
+│   │   │   └── definitions/
+│   │   │       ├── index.ts
+│   │   │       └── nvd-cve.resource.ts
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── index.ts
+│   │           ├── nvd-audit-cpe.tool.ts
+│   │           ├── nvd-get-cve-history.tool.ts
+│   │           ├── nvd-get-cve.tool.ts
+│   │           ├── nvd-search-cpes.tool.ts
+│   │           └── nvd-search-cves.tool.ts
+│   ├── services/
+│   │   ├── nvd-cpe/
+│   │   │   ├── nvd-cpe-service.ts
+│   │   │   └── types.ts
+│   │   ├── nvd-cve/
+│   │   │   ├── nvd-cve-service.ts
+│   │   │   └── types.ts
+│   │   └── nvd-http/
+│   │       └── nvd-http-client.ts
+│   └── index.ts
+├── tests/
+│   ├── prompts/
+│   ├── resources/
+│   │   └── nvd-cve.resource.test.ts
+│   └── tools/
+│       ├── nvd-audit-cpe.tool.test.ts
+│       ├── nvd-get-cve-history.tool.test.ts
+│       ├── nvd-get-cve.tool.test.ts
+│       ├── nvd-search-cpes.tool.test.ts
+│       └── nvd-search-cves.tool.test.ts
+├── .dockerignore
+├── .env.example
+├── .gitignore
+├── .mcpbignore
+├── AGENTS.md
+├── biome.json
+├── bun.lock
+├── bunfig.toml
+├── CHANGELOG.md
+├── CLAUDE.md
+├── devcheck.config.json
+├── Dockerfile
+├── LICENSE
+├── manifest.json
+├── package.json
+├── README.md
+├── server.json
+├── tsconfig.build.json
+├── tsconfig.json
+└── vitest.config.ts
+```
+
+_Note: This tree excludes files and directories matched by .gitignore and default patterns._
