@@ -1,12 +1,12 @@
 /**
  * @fileoverview Tool for fetching one or more CVEs by ID from the NIST NVD API.
- * @module mcp-server/tools/definitions/nvd-get-cve
+ * @module src/mcp-server/tools/definitions/nvd-get-cve
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
-import type { BriefCveRecord, CisaKev, CveRecord } from '@/services/nvd-cve/types.js';
+import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
 
 export const nvdGetCve = tool('nvd_get_cve', {
   title: 'Get CVE Details',
@@ -104,11 +104,10 @@ export const nvdGetCve = tool('nvd_get_cve', {
     const service = getNvdCveService();
     const result = await service.fetchById(ids, input.includeReferences, ctx);
 
-    const missingIds = result.missingIds.length > 0 ? result.missingIds : undefined;
     const queryMeta = {
       requested: result.requested,
       returned: result.returned,
-      ...(missingIds ? { missingIds } : {}),
+      ...(result.missingIds.length > 0 && { missingIds: result.missingIds }),
     };
 
     if (input.brief) {
@@ -118,8 +117,8 @@ export const nvdGetCve = tool('nvd_get_cve', {
           cveId: cve.cveId,
           vulnStatus: cve.vulnStatus,
           published: cve.published,
-          ...(cve.severity ? { severity: cve.severity } : {}),
-          ...(cve.cisaKev ? { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName } : {}),
+          ...(cve.severity && { severity: cve.severity }),
+          ...(cve.cisaKev && { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName }),
         })) as Record<string, unknown>[],
         queryMeta,
       };
@@ -137,7 +136,7 @@ export const nvdGetCve = tool('nvd_get_cve', {
     lines.push(
       `**Returned:** ${result.queryMeta.returned} / ${result.queryMeta.requested} requested`,
     );
-    if (result.queryMeta.missingIds && result.queryMeta.missingIds.length > 0) {
+    if (result.queryMeta.missingIds?.length) {
       lines.push(`**Not found in NVD:** ${result.queryMeta.missingIds.join(', ')}`);
     }
     lines.push(`**Mode:** ${result.brief ? 'Brief' : 'Full'}\n`);
@@ -196,12 +195,11 @@ export const nvdGetCve = tool('nvd_get_cve', {
         }
 
         if (cve.cisaKev) {
-          const kev = cve.cisaKev as CisaKev;
           lines.push(`\n**CISA KEV Details:**`);
-          lines.push(`- Name: ${kev.vulnerabilityName}`);
-          lines.push(`- Added: ${kev.exploitAddDate}`);
-          lines.push(`- Action Due: ${kev.actionDueDate}`);
-          lines.push(`- Required Action: ${kev.requiredAction}`);
+          lines.push(`- Name: ${cve.cisaKev.vulnerabilityName}`);
+          lines.push(`- Added: ${cve.cisaKev.exploitAddDate}`);
+          lines.push(`- Action Due: ${cve.cisaKev.actionDueDate}`);
+          lines.push(`- Required Action: ${cve.cisaKev.requiredAction}`);
         }
 
         if (cve.references && cve.references.length > 0) {

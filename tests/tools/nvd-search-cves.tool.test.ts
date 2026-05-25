@@ -254,4 +254,91 @@ describe('nvdSearchCves', () => {
       expect(mcpErr.data?.recovery?.hint).toContain('lastModDays');
     }
   });
+
+  // Issue #9: invalid date format errors must include data.reason
+  it('throws invalid_date_format with data.reason for invalid pubStartDate', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      pubStartDate: 'garbage',
+      pubEndDate: '2024-01-31T00:00:00.000Z',
+    });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_date_format' },
+    });
+  });
+
+  it('throws invalid_date_format with data.reason for invalid pubEndDate', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      pubStartDate: '2024-01-01T00:00:00.000Z',
+      pubEndDate: 'not-a-date',
+    });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_date_format' },
+    });
+  });
+
+  it('throws invalid_date_format with data.reason for invalid lastModStartDate', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({
+      lastModStartDate: 'garbage',
+      lastModEndDate: '2024-01-31T00:00:00.000Z',
+    });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_date_format' },
+    });
+  });
+
+  // Issue #13: severity=CRITICAL with severityVersion=v2 should fail at validation
+  it('throws invalid_severity_for_version when severity=CRITICAL and severityVersion=v2', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ severity: 'CRITICAL', severityVersion: 'v2' });
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_severity_for_version' },
+    });
+  });
+
+  it('allows severity=HIGH with severityVersion=v2 (valid combination)', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ severity: 'HIGH', severityVersion: 'v2' });
+    const result = await nvdSearchCves.handler(input, ctx);
+    expect(result.cves).toHaveLength(1);
+  });
+
+  it('allows severity=CRITICAL with severityVersion=v3 (valid combination)', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ severity: 'CRITICAL', severityVersion: 'v3' });
+    const result = await nvdSearchCves.handler(input, ctx);
+    expect(result.cves).toHaveLength(1);
+  });
+
+  // Issue #14: offset-past-end should not say "No CVEs matched"
+  it('formats offset-past-end with a helpful message when totalResults > 0 but returned = 0', () => {
+    const output = {
+      cves: [],
+      queryMeta: { totalResults: 3095, returned: 0, offset: 9999 },
+    };
+    const blocks = nvdSearchCves.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('9999');
+    expect(text).toContain('3095');
+    expect(text).not.toContain('No CVEs matched');
+  });
+
+  it('formats truly empty result (totalResults=0) with no-match message', () => {
+    const output = {
+      cves: [],
+      queryMeta: { totalResults: 0, returned: 0, offset: 0 },
+    };
+    const blocks = nvdSearchCves.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('No CVEs matched');
+  });
+
+  // Issue #12: description accuracy (regression guard — the description text is read in catalog tests)
+  it('description does not claim no-filter returns most recently modified CVEs', () => {
+    expect(nvdSearchCves.description).not.toContain('most recently modified');
+  });
 });

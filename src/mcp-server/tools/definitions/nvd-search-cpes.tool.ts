@@ -1,21 +1,21 @@
 /**
  * @fileoverview Tool for searching the NVD CPE dictionary by keyword or match string.
- * @module mcp-server/tools/definitions/nvd-search-cpes
+ * @module src/mcp-server/tools/definitions/nvd-search-cpes
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getNvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 
+const CPE_PREFIX_REGEX = /^cpe:2\.3:/i;
+
 export const nvdSearchCpes = tool('nvd_search_cpes', {
   title: 'Search CPE Dictionary',
   description:
     'Search the NVD CPE (Common Platform Enumeration) dictionary by product keyword or partial match string. ' +
     'Returns CPE names, human-readable titles, and deprecation status. ' +
-    'Use this tool to find the correct cpeName before calling nvd_audit_cpe — ' +
-    'when multiple CPEs match a product name, review the results and select the right one ' +
-    'rather than guessing. CPE names are arcane strings like cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:* — ' +
-    'a wrong guess audits the wrong product.',
+    'Use before nvd_audit_cpe to resolve the correct CPE name for a product — CPE strings are precise identifiers ' +
+    '(e.g., cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*) and must match exactly to audit the right product.',
   annotations: { readOnlyHint: true, openWorldHint: false },
 
   input: z.object({
@@ -93,6 +93,13 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
         'Provide at least one of keyword (e.g., "apache http server") or cpeMatchString (partial CPEv2.3 pattern).',
     },
     {
+      reason: 'invalid_cpe_format',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The cpeMatchString does not start with "cpe:2.3:" — it is clearly not a valid CPEv2.3 string.',
+      recovery:
+        'Provide a valid CPEv2.3 string starting with "cpe:2.3:", or use keyword search to find the correct CPE name.',
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
@@ -107,9 +114,15 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       throw ctx.fail(
         'missing_search_input',
         'At least one of keyword or cpeMatchString is required.',
-        {
-          ...ctx.recoveryFor('missing_search_input'),
-        },
+        ctx.recoveryFor('missing_search_input'),
+      );
+    }
+
+    if (input.cpeMatchString && !CPE_PREFIX_REGEX.test(input.cpeMatchString)) {
+      throw ctx.fail(
+        'invalid_cpe_format',
+        `Invalid CPE string: "${input.cpeMatchString}". CPEv2.3 strings must start with "cpe:2.3:".`,
+        ctx.recoveryFor('invalid_cpe_format'),
       );
     }
 
@@ -120,23 +133,18 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     });
 
     const service = getNvdCpeService();
-    const searchParams: Parameters<typeof service.searchCpes>[0] = { limit: input.limit };
-    if (input.keyword) searchParams.keyword = input.keyword;
-    if (input.cpeMatchString) searchParams.cpeMatchString = input.cpeMatchString;
-    const result = await service.searchCpes(searchParams, ctx);
+    const result = await service.searchCpes(
+      {
+        limit: input.limit,
+        ...(input.keyword && { keyword: input.keyword }),
+        ...(input.cpeMatchString && { cpeMatchString: input.cpeMatchString }),
+      },
+      ctx,
+    );
 
     return {
-      cpes: result.cpes.map((cpe) => ({
-        cpeName: cpe.cpeName,
-        ...(cpe.title ? { title: cpe.title } : {}),
-        deprecated: cpe.deprecated,
-        ...(cpe.deprecatedBy ? { deprecatedBy: cpe.deprecatedBy } : {}),
-        ...(cpe.lastModified ? { lastModified: cpe.lastModified } : {}),
-      })),
-      queryMeta: {
-        totalResults: result.totalResults,
-        returned: result.returned,
-      },
+      cpes: result.cpes,
+      queryMeta: { totalResults: result.totalResults, returned: result.returned },
     };
   },
 

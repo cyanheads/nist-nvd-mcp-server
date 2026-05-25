@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-05-24
+
+Field-test fixes: CVSS v2 severity derivation, CPE format validation, invalid date errors, severity/version cross-check, offset-past-end message, and description accuracy.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-05-24
 
 Scope npm package to @cyanheads/nist-nvd-mcp-server.

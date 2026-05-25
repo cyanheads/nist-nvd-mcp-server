@@ -1,11 +1,13 @@
 /**
  * @fileoverview Tool for finding CVEs affecting a specific product and version by CPE.
- * @module mcp-server/tools/definitions/nvd-audit-cpe
+ * @module src/mcp-server/tools/definitions/nvd-audit-cpe
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
+
+const CPE_V23_REGEX = /^cpe:2\.3:/i;
 
 const CvssScoreSchema = z.object({
   version: z.string().describe('CVSS version (e.g., "2.0", "3.1", "4.0").'),
@@ -130,9 +132,9 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   description:
     'Find all CVEs affecting a specific product and version using CPE (Common Platform Enumeration). ' +
     'Requires either an exact CPE name (cpeName) or a partial match string (virtualMatchString) with optional version range bounds. ' +
-    'When cpeName is used, NVD automatically applies isVulnerable to exclude configurations where the CPE appears as a dependency but is not itself vulnerable. ' +
-    'Use nvd_search_cpes first to resolve the correct CPE string — CPE names are arcane and guessing leads to auditing the wrong product. ' +
-    'Returns full CVE records (targeted audit context justifies full detail).',
+    'With cpeName, NVD scopes results to configurations where the product is directly vulnerable, not merely referenced as a dependency. ' +
+    'Use nvd_search_cpes first to resolve the correct CPE string for a product. ' +
+    'Returns full CVE records.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -195,9 +197,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
           .optional()
           .describe('The virtual match string used, if provided.'),
       })
-      .describe(
-        'Query metadata echoing the CPE identifier used so callers can verify the correct product was queried.',
-      ),
+      .describe('Query metadata echoing the CPE identifier and match counts for the audit.'),
   }),
 
   errors: [
@@ -222,6 +222,13 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         'Version range parameters require virtualMatchString; provide that parameter or use cpeName for exact-version queries.',
     },
     {
+      reason: 'invalid_cpe_format',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'cpeName or virtualMatchString does not start with "cpe:2.3:" — not a valid CPEv2.3 string.',
+      recovery:
+        'Provide a valid CPEv2.3 string starting with "cpe:2.3:". Use nvd_search_cpes to find the correct CPE name.',
+    },
+    {
       reason: 'cpe_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'The cpeName is valid format but NVD returns no matching CVEs — the CPE may be misspelled or absent from NVD.',
@@ -241,26 +248,39 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   async handler(input, ctx) {
     // Validate inputs
     if (!input.cpeName && !input.virtualMatchString) {
-      throw ctx.fail('missing_cpe_input', 'Either cpeName or virtualMatchString is required.', {
-        ...ctx.recoveryFor('missing_cpe_input'),
-      });
+      throw ctx.fail(
+        'missing_cpe_input',
+        'Either cpeName or virtualMatchString is required.',
+        ctx.recoveryFor('missing_cpe_input'),
+      );
     }
     if (input.cpeName && input.virtualMatchString) {
       throw ctx.fail(
         'conflicting_cpe_inputs',
         'Provide only one of cpeName or virtualMatchString, not both.',
-        {
-          ...ctx.recoveryFor('conflicting_cpe_inputs'),
-        },
+        ctx.recoveryFor('conflicting_cpe_inputs'),
       );
     }
     if ((input.versionStart || input.versionEnd) && !input.virtualMatchString) {
       throw ctx.fail(
         'version_range_without_match_string',
         'versionStart/versionEnd require virtualMatchString.',
-        {
-          ...ctx.recoveryFor('version_range_without_match_string'),
-        },
+        ctx.recoveryFor('version_range_without_match_string'),
+      );
+    }
+
+    if (input.cpeName && !CPE_V23_REGEX.test(input.cpeName)) {
+      throw ctx.fail(
+        'invalid_cpe_format',
+        `Invalid CPE name: "${input.cpeName}". CPEv2.3 names must start with "cpe:2.3:".`,
+        ctx.recoveryFor('invalid_cpe_format'),
+      );
+    }
+    if (input.virtualMatchString && !CPE_V23_REGEX.test(input.virtualMatchString)) {
+      throw ctx.fail(
+        'invalid_cpe_format',
+        `Invalid CPE string: "${input.virtualMatchString}". CPEv2.3 strings must start with "cpe:2.3:".`,
+        ctx.recoveryFor('invalid_cpe_format'),
       );
     }
 
@@ -271,25 +291,27 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     });
 
     const service = getNvdCveService();
-    const auditParams: Parameters<typeof service.auditCpe>[0] = {
-      versionStartType: input.versionStartType,
-      versionEndType: input.versionEndType,
-      limit: input.limit,
-    };
-    if (input.cpeName) auditParams.cpeName = input.cpeName;
-    if (input.virtualMatchString) auditParams.virtualMatchString = input.virtualMatchString;
-    if (input.versionStart) auditParams.versionStart = input.versionStart;
-    if (input.versionEnd) auditParams.versionEnd = input.versionEnd;
-    if (input.severityMin) auditParams.severityMin = input.severityMin;
-    const result = await service.auditCpe(auditParams, ctx);
+    const result = await service.auditCpe(
+      {
+        ...(input.cpeName && { cpeName: input.cpeName }),
+        ...(input.virtualMatchString && { virtualMatchString: input.virtualMatchString }),
+        ...(input.versionStart && { versionStart: input.versionStart }),
+        versionStartType: input.versionStartType,
+        ...(input.versionEnd && { versionEnd: input.versionEnd }),
+        versionEndType: input.versionEndType,
+        ...(input.severityMin && { severityMin: input.severityMin }),
+        limit: input.limit,
+      },
+      ctx,
+    );
 
     return {
       cves: result.cves,
       queryMeta: {
         totalResults: result.totalResults,
         returned: result.returned,
-        ...(result.cpeName ? { cpeName: result.cpeName } : {}),
-        ...(result.virtualMatchString ? { virtualMatchString: result.virtualMatchString } : {}),
+        ...(result.cpeName && { cpeName: result.cpeName }),
+        ...(result.virtualMatchString && { virtualMatchString: result.virtualMatchString }),
       },
     };
   },

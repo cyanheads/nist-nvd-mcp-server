@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-05-24 13:11:03
+Generated on: 2026-05-25 01:43:57
 
 ```text
 nist-nvd-mcp-server/
@@ -134,6 +134,8 @@ nist-nvd-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   │   └── nvd-cve.resource.test.ts
+│   ├── services/
+│   │   └── nvd-cve-service.test.ts
 │   └── tools/
 │       ├── nvd-audit-cpe.tool.test.ts
 │       ├── nvd-get-cve-history.tool.test.ts
@@ -149,6 +151,7 @@ nist-nvd-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tool for searching CVEs by keyword, severity, CWE, date range, or KEV status.
- * @module mcp-server/tools/definitions/nvd-search-cves
+ * @module src/mcp-server/tools/definitions/nvd-search-cves
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -8,15 +8,6 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
 const MAX_DATE_RANGE_DAYS = 120;
-
-/** Parse a date string and return a Date, or throw a descriptive error. */
-function parseDate(dateStr: string, fieldName: string): Date {
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) {
-    throw new Error(`Invalid date for ${fieldName}: "${dateStr}". Expected ISO 8601 format.`);
-  }
-  return d;
-}
 
 /** Returns the date N days ago from now as ISO 8601 string (milliseconds zeroed, UTC). */
 function daysAgo(days: number): string {
@@ -53,10 +44,9 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   description:
     'Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. ' +
     'The primary discovery tool for vulnerability surveillance and triage workflows. ' +
-    'pubDays and lastModDays are convenience shorthands — the tool converts them to API date pairs ' +
-    'and clamps values over 120 days (the NVD API maximum), reporting the clamped range in queryMeta. ' +
-    'Search results are always brief; call nvd_get_cve for full detail on specific IDs. ' +
-    'At least one filter is recommended — omitting all filters returns the most recently modified CVEs.',
+    'pubDays and lastModDays are convenience shorthands that expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in queryMeta. ' +
+    'Returns brief summaries — call nvd_get_cve for full detail on specific IDs. ' +
+    'At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID).',
   annotations: { readOnlyHint: true, openWorldHint: false },
 
   input: z.object({
@@ -197,6 +187,18 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       recovery: 'Narrow the date range to 120 days or fewer, or use multiple paginated queries.',
     },
     {
+      reason: 'invalid_date_format',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'A date string provided for pubStartDate, pubEndDate, lastModStartDate, or lastModEndDate is not a valid ISO 8601 datetime.',
+      recovery: 'Use ISO 8601 format, e.g. 2024-01-01T00:00:00.000Z.',
+    },
+    {
+      reason: 'invalid_severity_for_version',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'severity="CRITICAL" was specified with severityVersion="v2" — CVSS v2 has no CRITICAL tier.',
+      recovery: 'Use LOW, MEDIUM, or HIGH when severityVersion is "v2". Use v3 or v4 for CRITICAL.',
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
@@ -219,9 +221,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       throw ctx.fail(
         'mutually_exclusive_params',
         'pubDays and pubStartDate/pubEndDate are mutually exclusive.',
-        {
-          ...ctx.recoveryFor('mutually_exclusive_params'),
-        },
+        ctx.recoveryFor('mutually_exclusive_params'),
       );
     }
     if (input.lastModDays !== undefined && (input.lastModStartDate || input.lastModEndDate)) {
@@ -238,28 +238,32 @@ export const nvdSearchCves = tool('nvd_search_cves', {
 
     // Validate co-requirement: start and end must be provided together.
     if (input.pubStartDate && !input.pubEndDate) {
-      throw ctx.fail('missing_date_pair', 'pubStartDate requires pubEndDate.', {
-        ...ctx.recoveryFor('missing_date_pair'),
-      });
+      throw ctx.fail(
+        'missing_date_pair',
+        'pubStartDate requires pubEndDate.',
+        ctx.recoveryFor('missing_date_pair'),
+      );
     }
     if (input.pubEndDate && !input.pubStartDate) {
-      throw ctx.fail('missing_date_pair', 'pubEndDate requires pubStartDate.', {
-        ...ctx.recoveryFor('missing_date_pair'),
-      });
+      throw ctx.fail(
+        'missing_date_pair',
+        'pubEndDate requires pubStartDate.',
+        ctx.recoveryFor('missing_date_pair'),
+      );
     }
     if (input.lastModStartDate && !input.lastModEndDate) {
-      throw ctx.fail('missing_date_pair', 'lastModStartDate requires lastModEndDate.', {
-        recovery: {
-          hint: 'Provide both the start and end date, or use lastModDays instead of an explicit date range.',
-        },
-      });
+      throw ctx.fail(
+        'missing_date_pair',
+        'lastModStartDate requires lastModEndDate.',
+        ctx.recoveryFor('missing_date_pair'),
+      );
     }
     if (input.lastModEndDate && !input.lastModStartDate) {
-      throw ctx.fail('missing_date_pair', 'lastModEndDate requires lastModStartDate.', {
-        recovery: {
-          hint: 'Provide both the start and end date, or use lastModDays instead of an explicit date range.',
-        },
-      });
+      throw ctx.fail(
+        'missing_date_pair',
+        'lastModEndDate requires lastModStartDate.',
+        ctx.recoveryFor('missing_date_pair'),
+      );
     }
 
     const datesClamped: Array<{ param: string; original: number; clamped: number }> = [];
@@ -295,86 +299,111 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       lastModDatesFromConvenience = true;
     }
 
+    // Validate severity cross-field constraint: CVSS v2 has no CRITICAL tier.
+    if (input.severity === 'CRITICAL' && input.severityVersion === 'v2') {
+      throw ctx.fail(
+        'invalid_severity_for_version',
+        'CVSS v2 has no CRITICAL severity tier. Valid values for severityVersion="v2" are LOW, MEDIUM, HIGH.',
+        ctx.recoveryFor('invalid_severity_for_version'),
+      );
+    }
+
     // Validate explicit date range spans — skip when dates came from convenience params
     // (those are always within the max range after clamping).
     if (!pubDatesFromConvenience && pubStartDate && pubEndDate) {
-      const start = parseDate(pubStartDate, 'pubStartDate');
-      const end = parseDate(pubEndDate, 'pubEndDate');
+      const start = new Date(pubStartDate);
+      const end = new Date(pubEndDate);
+      if (Number.isNaN(start.getTime())) {
+        throw ctx.fail(
+          'invalid_date_format',
+          `Invalid date for pubStartDate: "${pubStartDate}". Expected ISO 8601 format.`,
+          ctx.recoveryFor('invalid_date_format'),
+        );
+      }
+      if (Number.isNaN(end.getTime())) {
+        throw ctx.fail(
+          'invalid_date_format',
+          `Invalid date for pubEndDate: "${pubEndDate}". Expected ISO 8601 format.`,
+          ctx.recoveryFor('invalid_date_format'),
+        );
+      }
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
       if (days < 0) {
         throw ctx.fail(
           'date_range_inverted',
           'pubEndDate is before pubStartDate — the date range is inverted.',
-          {
-            ...ctx.recoveryFor('date_range_inverted'),
-          },
+          ctx.recoveryFor('date_range_inverted'),
         );
       }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',
           `Publication date range spans ${Math.ceil(days)} days; maximum is 120.`,
-          {
-            ...ctx.recoveryFor('date_range_exceeds_max'),
-          },
+          ctx.recoveryFor('date_range_exceeds_max'),
         );
       }
     }
 
     if (!lastModDatesFromConvenience && lastModStartDate && lastModEndDate) {
-      const start = parseDate(lastModStartDate, 'lastModStartDate');
-      const end = parseDate(lastModEndDate, 'lastModEndDate');
+      const start = new Date(lastModStartDate);
+      const end = new Date(lastModEndDate);
+      if (Number.isNaN(start.getTime())) {
+        throw ctx.fail(
+          'invalid_date_format',
+          `Invalid date for lastModStartDate: "${lastModStartDate}". Expected ISO 8601 format.`,
+          ctx.recoveryFor('invalid_date_format'),
+        );
+      }
+      if (Number.isNaN(end.getTime())) {
+        throw ctx.fail(
+          'invalid_date_format',
+          `Invalid date for lastModEndDate: "${lastModEndDate}". Expected ISO 8601 format.`,
+          ctx.recoveryFor('invalid_date_format'),
+        );
+      }
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
       if (days < 0) {
         throw ctx.fail(
           'date_range_inverted',
           'lastModEndDate is before lastModStartDate — the date range is inverted.',
-          {
-            ...ctx.recoveryFor('date_range_inverted'),
-          },
+          ctx.recoveryFor('date_range_inverted'),
         );
       }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',
           `Last-modified date range spans ${Math.ceil(days)} days; maximum is 120.`,
-          {
-            ...ctx.recoveryFor('date_range_exceeds_max'),
-          },
+          ctx.recoveryFor('date_range_exceeds_max'),
         );
       }
     }
 
     const service = getNvdCveService();
-    const searchParams: Parameters<typeof service.searchCves>[0] = {
-      severityVersion: input.severityVersion,
-      kevOnly: input.kevOnly,
-      noRejected: input.noRejected,
-      limit: input.limit,
-      offset: input.offset,
-    };
-    if (input.keyword) searchParams.keyword = input.keyword;
-    if (input.severity) searchParams.severityParam = input.severity;
-    if (input.cweId) searchParams.cweId = input.cweId;
-    if (pubStartDate) searchParams.pubStartDate = pubStartDate;
-    if (pubEndDate) searchParams.pubEndDate = pubEndDate;
-    if (lastModStartDate) searchParams.lastModStartDate = lastModStartDate;
-    if (lastModEndDate) searchParams.lastModEndDate = lastModEndDate;
-    const result = await service.searchCves(searchParams, ctx);
+    const result = await service.searchCves(
+      {
+        ...(input.keyword && { keyword: input.keyword }),
+        ...(input.severity && { severityParam: input.severity }),
+        severityVersion: input.severityVersion,
+        ...(input.cweId && { cweId: input.cweId }),
+        ...(pubStartDate && { pubStartDate }),
+        ...(pubEndDate && { pubEndDate }),
+        ...(lastModStartDate && { lastModStartDate }),
+        ...(lastModEndDate && { lastModEndDate }),
+        kevOnly: input.kevOnly,
+        noRejected: input.noRejected,
+        limit: input.limit,
+        offset: input.offset,
+      },
+      ctx,
+    );
 
     return {
-      cves: result.cves.map((cve) => ({
-        cveId: cve.cveId,
-        vulnStatus: cve.vulnStatus,
-        published: cve.published,
-        ...(cve.severity ? { severity: cve.severity } : {}),
-        ...(cve.cisaVulnerabilityName ? { cisaVulnerabilityName: cve.cisaVulnerabilityName } : {}),
-      })),
+      cves: result.cves,
       queryMeta: {
         totalResults: result.totalResults,
         returned: result.returned,
         offset: result.offset,
-        ...(datesClamped.length > 0 ? { datesClamped } : {}),
+        ...(datesClamped.length > 0 && { datesClamped }),
       },
     };
   },
@@ -395,9 +424,16 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     }
 
     if (result.cves.length === 0) {
-      lines.push(
-        '\nNo CVEs matched the search criteria. Try broadening the keyword or date range.',
-      );
+      if (result.queryMeta.totalResults > 0) {
+        lines.push(
+          `\nOffset ${result.queryMeta.offset} is past the end of the result set ` +
+            `(${result.queryMeta.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else {
+        lines.push(
+          '\nNo CVEs matched the search criteria. Try broadening the keyword or date range.',
+        );
+      }
       return [{ type: 'text', text: lines.join('\n') }];
     }
 

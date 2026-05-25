@@ -165,4 +165,29 @@ describe('nvdSearchCpes', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('truncated');
   });
+
+  // Issue #10: malformed CPE strings should fail locally before hitting NVD
+  it('throws invalid_cpe_format when cpeMatchString does not start with cpe:2.3:', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'not-a-valid-cpe' });
+    await expect(nvdSearchCpes.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_cpe_format' },
+    });
+  });
+
+  it('throws invalid_cpe_format for garbage cpeMatchString', async () => {
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'garbage' });
+    await expect(nvdSearchCpes.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_cpe_format' },
+    });
+  });
+
+  it('accepts a valid cpe:2.3: cpeMatchString', async () => {
+    mockService.searchCpes.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:apache:http_server' });
+    const result = await nvdSearchCpes.handler(input, ctx);
+    expect(result.cpes).toHaveLength(1);
+  });
 });

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Resource exposing a single CVE record by ID via a stable URI.
- * @module mcp-server/resources/definitions/nvd-cve
+ * @module src/mcp-server/resources/definitions/nvd-cve
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
@@ -12,7 +12,7 @@ const CVE_ID_REGEX = /^CVE-\d{4}-\d{4,}$/i;
 export const nvdCveResource = resource('nvd://cve/{cveId}', {
   name: 'NVD CVE Record',
   description:
-    'Fetch a single CVE record by ID from the NIST NVD — stable URI for injectable context. ' +
+    'Fetch a single CVE record by ID from the NIST NVD via a stable URI. ' +
     'Returns the same full data as nvd_get_cve for a single ID: CVSS scores, CWE weaknesses, ' +
     'CPE configurations, CISA KEV fields, and references.',
   mimeType: 'application/json',

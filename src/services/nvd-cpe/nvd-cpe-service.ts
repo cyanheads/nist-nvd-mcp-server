@@ -22,10 +22,10 @@ function normalizeCpe(raw: RawCpeItem): CpeRecord {
 
   return {
     cpeName: raw.cpeName ?? '',
-    ...(titles.length > 0 ? { title: titles[0] } : {}),
+    ...(titles.length > 0 && { title: titles[0] }),
     deprecated: raw.deprecated ?? false,
-    ...(deprecatedBy.length > 0 ? { deprecatedBy } : {}),
-    ...(raw.lastModified ? { lastModified: raw.lastModified } : {}),
+    ...(deprecatedBy.length > 0 && { deprecatedBy }),
+    ...(raw.lastModified && { lastModified: raw.lastModified }),
   };
 }
 
