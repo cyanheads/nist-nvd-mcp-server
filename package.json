@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/nist-nvd-mcp-server",
   "mcpName": "io.github.cyanheads/nist-nvd-mcp-server",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
@@ -35,6 +35,7 @@
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
     "test": "bunx vitest run",
+    "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish",
     "start": "bun dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js"

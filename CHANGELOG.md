@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-05-26
+
+Add publish-mcp script to package.json
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-05-26
 
 FUNDING.yml, hosted server URL, Bun badge fix, manifest.json in files array
