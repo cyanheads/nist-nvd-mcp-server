@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-05-26
+
+FUNDING.yml, hosted server URL, Bun badge fix, manifest.json in files array
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-05-24
 
 Drop tsx, align all scripts to bun-native execution, revert Dockerfile to oven/bun:1.3, add funding block, bump typescript ^5.9.3 → ^6.0.3

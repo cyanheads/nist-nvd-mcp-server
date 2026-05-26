@@ -1,14 +1,15 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-05-25 01:43:57
+Generated on: 2026-05-26 07:46:18
 
 ```text
 nist-nvd-mcp-server/
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   └── FUNDING.yml
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
