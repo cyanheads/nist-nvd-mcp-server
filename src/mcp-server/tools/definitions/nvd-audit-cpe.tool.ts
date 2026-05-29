@@ -203,27 +203,27 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   errors: [
     {
       reason: 'missing_cpe_input',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Neither cpeName nor virtualMatchString was provided.',
       recovery:
         'Provide either cpeName (exact CPEv2.3 string) or virtualMatchString (partial match pattern) — use nvd_search_cpes to find the correct CPE.',
     },
     {
       reason: 'conflicting_cpe_inputs',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Both cpeName and virtualMatchString were provided simultaneously.',
       recovery: 'Provide only one of cpeName or virtualMatchString per call, not both.',
     },
     {
       reason: 'version_range_without_match_string',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'versionStart or versionEnd was provided without virtualMatchString.',
       recovery:
         'Version range parameters require virtualMatchString; provide that parameter or use cpeName for exact-version queries.',
     },
     {
       reason: 'invalid_cpe_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'cpeName or virtualMatchString does not start with "cpe:2.3:" — not a valid CPEv2.3 string.',
       recovery:
         'Provide a valid CPEv2.3 string starting with "cpe:2.3:". Use nvd_search_cpes to find the correct CPE name.',

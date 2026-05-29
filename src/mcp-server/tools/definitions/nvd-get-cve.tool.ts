@@ -77,7 +77,7 @@ export const nvdGetCve = tool('nvd_get_cve', {
   errors: [
     {
       reason: 'invalid_cve_id_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'One or more CVE IDs fail format validation (NVD returns HTTP 404 for malformed IDs).',
       recovery: 'Use the format CVE-YYYY-NNNNN (e.g., CVE-2021-44228) and verify each ID.',
     },

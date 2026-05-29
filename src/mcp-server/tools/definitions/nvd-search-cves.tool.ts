@@ -162,39 +162,39 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   errors: [
     {
       reason: 'mutually_exclusive_params',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Both pubDays and pubStartDate/pubEndDate provided, or both lastModDays and lastModStartDate/lastModEndDate.',
       recovery:
         'Use either the convenience shorthand (pubDays) or the explicit date range (pubStartDate + pubEndDate), not both.',
     },
     {
       reason: 'missing_date_pair',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Only one of pubStartDate/pubEndDate (or lastModStartDate/lastModEndDate) was provided — NVD requires both.',
       recovery:
         'Provide both the start and end date, or use pubDays/lastModDays instead of an explicit date range.',
     },
     {
       reason: 'date_range_inverted',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The end date is before the start date.',
       recovery: 'Ensure the end date is after the start date.',
     },
     {
       reason: 'date_range_exceeds_max',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Explicit pubStartDate/pubEndDate or lastModStartDate/lastModEndDate span more than 120 days.',
       recovery: 'Narrow the date range to 120 days or fewer, or use multiple paginated queries.',
     },
     {
       reason: 'invalid_date_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'A date string provided for pubStartDate, pubEndDate, lastModStartDate, or lastModEndDate is not a valid ISO 8601 datetime.',
       recovery: 'Use ISO 8601 format, e.g. 2024-01-01T00:00:00.000Z.',
     },
     {
       reason: 'invalid_severity_for_version',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'severity="CRITICAL" was specified with severityVersion="v2" — CVSS v2 has no CRITICAL tier.',
       recovery: 'Use LOW, MEDIUM, or HIGH when severityVersion is "v2". Use v3 or v4 for CRITICAL.',
     },

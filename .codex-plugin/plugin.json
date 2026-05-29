@@ -1,0 +1,25 @@
+{
+  "name": "@cyanheads/nist-nvd-mcp-server",
+  "version": "0.1.7",
+  "description": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/nist-nvd-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/nist-nvd-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "nist", "nvd", "cve", "cpe", "vulnerability", "security", "cvss"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "@cyanheads/nist-nvd-mcp-server",
+    "shortDescription": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database.",
+    "longDescription": "Provides read-only access to the NIST National Vulnerability Database (NVD). Search CVEs by keyword, severity (CVSS v2/v3/v4), CWE, date range, or CISA KEV status. Fetch full CVE details with CVSS scores and affected CPE configurations. Audit a specific product version for all known vulnerabilities. Track CVE score changes over time.",
+    "developerName": "cyanheads",
+    "category": "security",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/nist-nvd-mcp-server",
+    "defaultPrompt": []
+  }
+}

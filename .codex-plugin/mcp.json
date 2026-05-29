@@ -1,0 +1,10 @@
+{
+  "@cyanheads/nist-nvd-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/nist-nvd-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio",
+      "NVD_API_KEY": "your-nvd-api-key"
+    }
+  }
+}

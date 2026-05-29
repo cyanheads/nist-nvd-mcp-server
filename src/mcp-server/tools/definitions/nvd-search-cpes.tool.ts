@@ -87,14 +87,14 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   errors: [
     {
       reason: 'missing_search_input',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Neither keyword nor cpeMatchString was provided.',
       recovery:
         'Provide at least one of keyword (e.g., "apache http server") or cpeMatchString (partial CPEv2.3 pattern).',
     },
     {
       reason: 'invalid_cpe_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The cpeMatchString does not start with "cpe:2.3:" — it is clearly not a valid CPEv2.3 string.',
       recovery:
         'Provide a valid CPEv2.3 string starting with "cpe:2.3:", or use keyword search to find the correct CPE name.',
