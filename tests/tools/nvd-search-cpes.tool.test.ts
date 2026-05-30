@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-search-cpes.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
 import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
@@ -43,7 +43,7 @@ describe('nvdSearchCpes', () => {
     mockService.searchCpes.mockReset();
   });
 
-  it('returns CPE entries for a keyword search', async () => {
+  it('returns CPE entries and enrichment for a keyword search', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext();
     const input = nvdSearchCpes.input.parse({ keyword: 'apache http server' });
@@ -52,8 +52,10 @@ describe('nvdSearchCpes', () => {
     expect(result.cpes).toHaveLength(1);
     expect(result.cpes[0].cpeName).toBe('cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*');
     expect(result.cpes[0].deprecated).toBe(false);
-    expect(result.queryMeta.totalResults).toBe(1);
-    expect(result.queryMeta.returned).toBe(1);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.returned).toBe(1);
   });
 
   it('returns CPE entries for a cpeMatchString search', async () => {
@@ -96,26 +98,26 @@ describe('nvdSearchCpes', () => {
     expect(result.cpes[0].cpeName).toBe('cpe:2.3:a:some_vendor:some_product:1.0:*:*:*:*:*:*:*');
   });
 
-  it('handles empty search results', async () => {
+  it('handles empty search results with enriched notice', async () => {
     mockService.searchCpes.mockResolvedValue({ cpes: [], totalResults: 0, returned: 0 });
     const ctx = createMockContext();
     const input = nvdSearchCpes.input.parse({ keyword: 'nonexistent_product_xyz' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
     expect(result.cpes).toHaveLength(0);
-    expect(result.queryMeta.totalResults).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(0);
+    expect(enrichment.notice).toContain('No CPEs matched');
   });
 
   it('formats CPE results with name and title', () => {
     const output = {
       cpes: [{ cpeName: CPE_APACHE.cpeName, title: CPE_APACHE.title, deprecated: false }],
-      queryMeta: { totalResults: 1, returned: 1 },
     };
     const blocks = nvdSearchCpes.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Apache HTTP Server 2.4.51');
     expect(text).toContain('cpe:2.3:a:apache:http_server:2.4.51');
-    expect(text).toContain('**Total:** 1');
   });
 
   it('formats deprecated CPE with deprecation marker', () => {
@@ -128,7 +130,6 @@ describe('nvdSearchCpes', () => {
           deprecatedBy: CPE_DEPRECATED.deprecatedBy,
         },
       ],
-      queryMeta: { totalResults: 1, returned: 1 },
     };
     const blocks = nvdSearchCpes.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -136,34 +137,35 @@ describe('nvdSearchCpes', () => {
     expect(text).toContain('Deprecated By');
   });
 
-  it('formats empty results with no-match message', () => {
-    const output = {
-      cpes: [],
-      queryMeta: { totalResults: 0, returned: 0 },
-    };
+  it('formats empty results with placeholder', () => {
+    const output = { cpes: [] };
     const blocks = nvdSearchCpes.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('No CPEs matched');
+    // format() renders domain payload; notices reach content[] via enrichment trailer
+    expect(text).toBeTruthy();
   });
 
   it('formats CPE without title using cpeName as heading', () => {
     const output = {
       cpes: [{ cpeName: CPE_NO_TITLE.cpeName, deprecated: false }],
-      queryMeta: { totalResults: 1, returned: 1 },
     };
     const blocks = nvdSearchCpes.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('cpe:2.3:a:some_vendor:some_product:1.0');
   });
 
-  it('formats truncation notice when totalResults exceeds returned', () => {
-    const output = {
-      cpes: [{ cpeName: CPE_APACHE.cpeName, title: CPE_APACHE.title, deprecated: false }],
-      queryMeta: { totalResults: 100, returned: 1 },
-    };
-    const blocks = nvdSearchCpes.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('truncated');
+  it('enriches truncation notice when totalResults exceeds returned', async () => {
+    mockService.searchCpes.mockResolvedValue({
+      cpes: [CPE_APACHE],
+      totalResults: 100,
+      returned: 1,
+    });
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
+    await nvdSearchCpes.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('truncated');
   });
 
   // Issue #10: malformed CPE strings should fail locally before hitting NVD

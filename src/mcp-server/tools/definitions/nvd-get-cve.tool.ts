@@ -60,19 +60,24 @@ export const nvdGetCve = tool('nvd_get_cve', {
         'CVE records. In full mode: complete records with CVSS scores, configurations, weaknesses, and references. ' +
           'In brief mode: trimmed records with ID, status, top severity, and CISA KEV name.',
       ),
-    queryMeta: z
-      .object({
-        requested: z.number().describe('Number of CVE IDs requested.'),
-        returned: z.number().describe('Number of CVE records returned.'),
-        missingIds: z
-          .array(z.string().describe('A CVE ID not found in NVD.'))
-          .optional()
-          .describe(
-            'CVE IDs that were requested but returned no NVD data. Absent when all IDs matched.',
-          ),
-      })
-      .describe('Count metadata for verifying ID-to-record parity.'),
   }),
+
+  enrichment: {
+    requested: z.number().describe('Number of CVE IDs requested.'),
+    returned: z.number().describe('Number of CVE records returned.'),
+    missingIds: z
+      .array(z.string().describe('A CVE ID not found in NVD.'))
+      .optional()
+      .describe('CVE IDs requested but not found in NVD. Absent when all IDs matched.'),
+  },
+
+  enrichmentTrailer: {
+    requested: { label: 'Requested' },
+    returned: { label: 'Returned' },
+    missingIds: {
+      render: (ids) => `**Not found in NVD:** ${ids?.join(', ')}`,
+    },
+  },
 
   errors: [
     {
@@ -104,11 +109,11 @@ export const nvdGetCve = tool('nvd_get_cve', {
     const service = getNvdCveService();
     const result = await service.fetchById(ids, input.includeReferences, ctx);
 
-    const queryMeta = {
+    ctx.enrich({
       requested: result.requested,
       returned: result.returned,
       ...(result.missingIds.length > 0 && { missingIds: result.missingIds }),
-    };
+    });
 
     if (input.brief) {
       return {
@@ -120,25 +125,17 @@ export const nvdGetCve = tool('nvd_get_cve', {
           ...(cve.severity && { severity: cve.severity }),
           ...(cve.cisaKev && { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName }),
         })) as Record<string, unknown>[],
-        queryMeta,
       };
     }
 
     return {
       brief: false,
       cves: result.cves as unknown as Record<string, unknown>[],
-      queryMeta,
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(
-      `**Returned:** ${result.queryMeta.returned} / ${result.queryMeta.requested} requested`,
-    );
-    if (result.queryMeta.missingIds?.length) {
-      lines.push(`**Not found in NVD:** ${result.queryMeta.missingIds.join(', ')}`);
-    }
     lines.push(`**Mode:** ${result.brief ? 'Brief' : 'Full'}\n`);
 
     for (const rawCve of result.cves) {

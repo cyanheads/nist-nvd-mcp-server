@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-audit-cpe.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -87,7 +87,7 @@ describe('nvdAuditCpe', () => {
     mockService.auditCpe.mockReset();
   });
 
-  it('returns CVEs for a valid cpeName', async () => {
+  it('returns CVEs and enrichment for a valid cpeName', async () => {
     mockService.auditCpe.mockResolvedValue(makeAuditResult());
     const ctx = createMockContext();
     const input = nvdAuditCpe.input.parse({
@@ -97,11 +97,13 @@ describe('nvdAuditCpe', () => {
 
     expect(result.cves).toHaveLength(1);
     expect(result.cves[0].cveId).toBe('CVE-2021-44228');
-    expect(result.queryMeta.totalResults).toBe(1);
-    expect(result.queryMeta.cpeName).toBe('cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*');
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.auditTarget).toBe('cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*');
   });
 
-  it('returns CVEs for a virtualMatchString', async () => {
+  it('returns CVEs and enrichment for a virtualMatchString', async () => {
     mockService.auditCpe.mockResolvedValue(
       makeAuditResult([FULL_CVE], {
         virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
@@ -111,10 +113,10 @@ describe('nvdAuditCpe', () => {
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
     });
-    const result = await nvdAuditCpe.handler(input, ctx);
+    await nvdAuditCpe.handler(input, ctx);
 
-    expect(result.queryMeta.virtualMatchString).toBe('cpe:2.3:a:apache:log4j:*');
-    expect(result.queryMeta.cpeName).toBeUndefined();
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.auditTarget).toBe('cpe:2.3:a:apache:log4j:*');
   });
 
   it('throws missing_cpe_input when neither cpeName nor virtualMatchString provided', async () => {
@@ -188,34 +190,19 @@ describe('nvdAuditCpe', () => {
   });
 
   it('formats audit results with CVE IDs and severity', () => {
-    const output = {
-      cves: [FULL_CVE],
-      queryMeta: {
-        totalResults: 1,
-        returned: 1,
-        cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
-      },
-    };
+    const output = { cves: [FULL_CVE] };
     const blocks = nvdAuditCpe.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('CVE-2021-44228');
     expect(text).toContain('CRITICAL');
     expect(text).toContain('10');
-    expect(text).toContain('cpe:2.3:a:apache:log4j:2.14.1');
     expect(text).toContain('CWE-20');
     expect(text).toContain('Apache Log4j2 JNDI vulnerability');
     expect(text).toContain('Apache Log4j2 Remote Code Execution Vulnerability');
   });
 
   it('formats sparse CVE without severity using "Not available"', () => {
-    const output = {
-      cves: [SPARSE_CVE],
-      queryMeta: {
-        totalResults: 1,
-        returned: 1,
-        virtualMatchString: 'cpe:2.3:a:some_vendor:product:*',
-      },
-    };
+    const output = { cves: [SPARSE_CVE] };
     const blocks = nvdAuditCpe.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Not available');
@@ -223,18 +210,10 @@ describe('nvdAuditCpe', () => {
   });
 
   it('formats empty audit result with no-CVE message', () => {
-    const output = {
-      cves: [],
-      queryMeta: {
-        totalResults: 0,
-        returned: 0,
-        cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
-      },
-    };
+    const output = { cves: [] };
     const blocks = nvdAuditCpe.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('No CVEs found');
-    expect(text).toContain('nvd_search_cpes');
+    expect(text).toContain('No CVEs returned');
   });
 
   // Issue #10: malformed CPE strings should fail locally before hitting NVD
@@ -262,5 +241,22 @@ describe('nvdAuditCpe', () => {
     });
     const result = await nvdAuditCpe.handler(input, ctx);
     expect(result.cves).toHaveLength(1);
+  });
+
+  it('enriches empty-result notice when no CVEs found', async () => {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 0,
+      returned: 0,
+      cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('nvd_search_cpes');
   });
 });

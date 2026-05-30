@@ -72,17 +72,21 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
           .describe('One CPE dictionary entry.'),
       )
       .describe('Matching CPE dictionary entries.'),
-    queryMeta: z
-      .object({
-        totalResults: z
-          .number()
-          .describe('Total matching CPE entries before the limit was applied.'),
-        returned: z.number().describe('Number of entries returned in this response.'),
-      })
-      .describe(
-        'Query metadata. When totalResults > returned, narrow the keyword for more specific results.',
-      ),
   }),
+
+  enrichment: {
+    totalResults: z.number().describe('Total matching CPE entries before the limit was applied.'),
+    returned: z.number().describe('Number of entries returned in this response.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when no CPEs matched or results were truncated.'),
+  },
+
+  enrichmentTrailer: {
+    totalResults: { label: 'Total Results' },
+    returned: { label: 'Returned' },
+  },
 
   errors: [
     {
@@ -142,28 +146,22 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       ctx,
     );
 
-    return {
-      cpes: result.cpes,
-      queryMeta: { totalResults: result.totalResults, returned: result.returned },
-    };
+    ctx.enrich({ totalResults: result.totalResults, returned: result.returned });
+    if (result.cpes.length === 0) {
+      ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');
+    } else if (result.totalResults > result.returned) {
+      ctx.enrich.notice('Results truncated — narrow the keyword for more specific results.');
+    }
+
+    return { cpes: result.cpes };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(
-      `**Total:** ${result.queryMeta.totalResults} matching CPEs | **Returned:** ${result.queryMeta.returned}`,
-    );
-
-    if (result.queryMeta.totalResults > result.queryMeta.returned) {
-      lines.push(`> Results truncated — narrow the keyword for more specific results.`);
-    }
 
     if (result.cpes.length === 0) {
-      lines.push('\nNo CPEs matched. Try a broader keyword or different spelling.');
-      return [{ type: 'text', text: lines.join('\n') }];
+      return [{ type: 'text', text: 'No CPEs returned.' }];
     }
-
-    lines.push('');
 
     for (const cpe of result.cpes) {
       const depFlag = cpe.deprecated ? ' *(deprecated)*' : '';

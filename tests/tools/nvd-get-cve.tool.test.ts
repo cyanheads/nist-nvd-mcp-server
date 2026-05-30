@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-get-cve.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdGetCve } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -68,7 +68,7 @@ describe('nvdGetCve', () => {
     mockService.fetchById.mockReset();
   });
 
-  it('returns full records for a single CVE ID (string)', async () => {
+  it('returns full records and enrichment for a single CVE ID (string)', async () => {
     mockService.fetchById.mockResolvedValue({
       cves: [FULL_CVE],
       returned: 1,
@@ -81,9 +81,11 @@ describe('nvdGetCve', () => {
 
     expect(result.brief).toBe(false);
     expect(result.cves).toHaveLength(1);
-    expect(result.queryMeta.requested).toBe(1);
-    expect(result.queryMeta.returned).toBe(1);
-    expect(result.queryMeta.missingIds).toBeUndefined();
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.requested).toBe(1);
+    expect(enrichment.returned).toBe(1);
+    expect(enrichment.missingIds).toBeUndefined();
   });
 
   it('returns brief records when brief: true', async () => {
@@ -107,7 +109,7 @@ describe('nvdGetCve', () => {
     expect(cve.cisaVulnerabilityName).toBe('Apache Log4j2 Remote Code Execution Vulnerability');
   });
 
-  it('handles an array of CVE IDs', async () => {
+  it('handles an array of CVE IDs and enriches counts', async () => {
     mockService.fetchById.mockResolvedValue({
       cves: [FULL_CVE, SPARSE_CVE],
       returned: 2,
@@ -119,8 +121,9 @@ describe('nvdGetCve', () => {
     const result = await nvdGetCve.handler(input, ctx);
 
     expect(result.cves).toHaveLength(2);
-    expect(result.queryMeta.requested).toBe(2);
-    expect(result.queryMeta.returned).toBe(2);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.requested).toBe(2);
+    expect(enrichment.returned).toBe(2);
   });
 
   it('propagates service errors (e.g. cve_not_found)', async () => {
@@ -149,7 +152,7 @@ describe('nvdGetCve', () => {
     expect(cve.severity).toBeUndefined();
   });
 
-  it('exposes missingIds in queryMeta for partial batch results', async () => {
+  it('exposes missingIds in enrichment for partial batch results', async () => {
     mockService.fetchById.mockResolvedValue({
       cves: [FULL_CVE],
       returned: 1,
@@ -161,11 +164,12 @@ describe('nvdGetCve', () => {
       cveIds: ['CVE-2021-44228', 'CVE-2099-99999'],
       brief: true,
     });
-    const result = await nvdGetCve.handler(input, ctx);
+    await nvdGetCve.handler(input, ctx);
 
-    expect(result.queryMeta.missingIds).toEqual(['CVE-2099-99999']);
-    expect(result.queryMeta.returned).toBe(1);
-    expect(result.queryMeta.requested).toBe(2);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.missingIds).toEqual(['CVE-2099-99999']);
+    expect(enrichment.returned).toBe(1);
+    expect(enrichment.requested).toBe(2);
   });
 
   it('rejects empty cveIds array at schema parse', () => {
@@ -176,7 +180,6 @@ describe('nvdGetCve', () => {
     const output = {
       brief: false,
       cves: [FULL_CVE as unknown as Record<string, unknown>],
-      queryMeta: { requested: 1, returned: 1 },
     };
     const blocks = nvdGetCve.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -200,7 +203,6 @@ describe('nvdGetCve', () => {
           cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
         } as Record<string, unknown>,
       ],
-      queryMeta: { requested: 1, returned: 1 },
     };
     const blocks = nvdGetCve.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -219,7 +221,6 @@ describe('nvdGetCve', () => {
           published: '2022-01-01T00:00:00.000',
         } as Record<string, unknown>,
       ],
-      queryMeta: { requested: 1, returned: 1 },
     };
     const blocks = nvdGetCve.format!(output);
     const text = (blocks[0] as { text: string }).text;

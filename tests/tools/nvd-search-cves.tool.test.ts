@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-search-cves.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -36,7 +36,7 @@ describe('nvdSearchCves', () => {
     mockService.searchCves.mockReset();
   });
 
-  it('returns CVE summaries with metadata for a keyword search', async () => {
+  it('returns CVE summaries and enrichment for a keyword search', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext();
     const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
@@ -44,10 +44,12 @@ describe('nvdSearchCves', () => {
 
     expect(result.cves).toHaveLength(1);
     expect(result.cves[0].cveId).toBe('CVE-2021-44228');
-    expect(result.queryMeta.totalResults).toBe(1);
-    expect(result.queryMeta.returned).toBe(1);
-    expect(result.queryMeta.offset).toBe(0);
-    expect(result.queryMeta.datesClamped).toBeUndefined();
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.returned).toBe(1);
+    expect(enrichment.offset).toBe(0);
+    expect(enrichment.datesClamped).toBeUndefined();
   });
 
   it('applies defaults when no filters are provided', async () => {
@@ -57,30 +59,33 @@ describe('nvdSearchCves', () => {
     const result = await nvdSearchCves.handler(input, ctx);
 
     expect(result.cves).toHaveLength(0);
-    expect(result.queryMeta.totalResults).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(0);
   });
 
-  it('clamps pubDays over 120 and reports clamping in queryMeta', async () => {
+  it('clamps pubDays over 120 and reports clamping in enrichment', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext();
     const input = nvdSearchCves.input.parse({ pubDays: 200 });
-    const result = await nvdSearchCves.handler(input, ctx);
+    await nvdSearchCves.handler(input, ctx);
 
-    expect(result.queryMeta.datesClamped).toHaveLength(1);
-    expect(result.queryMeta.datesClamped![0].param).toBe('pubDays');
-    expect(result.queryMeta.datesClamped![0].original).toBe(200);
-    expect(result.queryMeta.datesClamped![0].clamped).toBe(120);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.datesClamped).toHaveLength(1);
+    expect(enrichment.datesClamped![0].param).toBe('pubDays');
+    expect(enrichment.datesClamped![0].original).toBe(200);
+    expect(enrichment.datesClamped![0].clamped).toBe(120);
   });
 
   it('clamps lastModDays over 120 and reports clamping', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext();
     const input = nvdSearchCves.input.parse({ lastModDays: 150 });
-    const result = await nvdSearchCves.handler(input, ctx);
+    await nvdSearchCves.handler(input, ctx);
 
-    expect(result.queryMeta.datesClamped).toHaveLength(1);
-    expect(result.queryMeta.datesClamped![0].param).toBe('lastModDays');
-    expect(result.queryMeta.datesClamped![0].original).toBe(150);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.datesClamped).toHaveLength(1);
+    expect(enrichment.datesClamped![0].param).toBe('lastModDays');
+    expect(enrichment.datesClamped![0].original).toBe(150);
   });
 
   it('throws mutually_exclusive_params when pubDays and pubStartDate are both provided', async () => {
@@ -129,10 +134,7 @@ describe('nvdSearchCves', () => {
   });
 
   it('formats output with CVE IDs and severity present', () => {
-    const output = {
-      cves: [BRIEF_CVE],
-      queryMeta: { totalResults: 1, returned: 1, offset: 0 },
-    };
+    const output = { cves: [BRIEF_CVE] };
     const blocks = nvdSearchCves.format!(output);
     expect(blocks[0].type).toBe('text');
     const text = (blocks[0] as { text: string }).text;
@@ -141,37 +143,16 @@ describe('nvdSearchCves', () => {
     expect(text).toContain('10');
   });
 
-  it('formats output with clamping notice', () => {
-    const output = {
-      cves: [BRIEF_CVE],
-      queryMeta: {
-        totalResults: 1,
-        returned: 1,
-        offset: 0,
-        datesClamped: [{ param: 'pubDays', original: 200, clamped: 120 }],
-      },
-    };
+  it('formats empty result with no-match placeholder', () => {
+    const output = { cves: [] };
     const blocks = nvdSearchCves.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('clamped to 120');
-    expect(text).toContain('pubDays');
-  });
-
-  it('formats empty result with no-match message', () => {
-    const output = {
-      cves: [],
-      queryMeta: { totalResults: 0, returned: 0, offset: 0 },
-    };
-    const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('No CVEs matched');
+    expect(text).toBeTruthy();
+    // format() renders domain payload only; enrichment trailer carries notices
   });
 
   it('formats CVE without severity using "Not available"', () => {
-    const output = {
-      cves: [BRIEF_CVE_NO_SEVERITY],
-      queryMeta: { totalResults: 1, returned: 1, offset: 0 },
-    };
+    const output = { cves: [BRIEF_CVE_NO_SEVERITY] };
     const blocks = nvdSearchCves.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Not available');
@@ -314,27 +295,48 @@ describe('nvdSearchCves', () => {
     expect(result.cves).toHaveLength(1);
   });
 
-  // Issue #14: offset-past-end should not say "No CVEs matched"
-  it('formats offset-past-end with a helpful message when totalResults > 0 but returned = 0', () => {
-    const output = {
+  it('enriches notice when offset is past end of result set', async () => {
+    mockService.searchCves.mockResolvedValue({
       cves: [],
-      queryMeta: { totalResults: 3095, returned: 0, offset: 9999 },
-    };
-    const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('9999');
-    expect(text).toContain('3095');
-    expect(text).not.toContain('No CVEs matched');
+      totalResults: 3095,
+      returned: 0,
+      offset: 9999,
+    });
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ offset: 9999 });
+    await nvdSearchCves.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('9999');
+    expect(enrichment.notice).toContain('3095');
   });
 
-  it('formats truly empty result (totalResults=0) with no-match message', () => {
-    const output = {
+  it('enriches notice when no CVEs matched at all (totalResults=0)', async () => {
+    mockService.searchCves.mockResolvedValue({
       cves: [],
-      queryMeta: { totalResults: 0, returned: 0, offset: 0 },
-    };
-    const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('No CVEs matched');
+      totalResults: 0,
+      returned: 0,
+      offset: 0,
+    });
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({});
+    await nvdSearchCves.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('No CVEs matched');
+  });
+
+  it('enriches datesClamped when pubDays exceeds 120', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ pubDays: 200 });
+    await nvdSearchCves.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.datesClamped).toHaveLength(1);
+    expect(enrichment.datesClamped![0].param).toBe('pubDays');
+    expect(enrichment.datesClamped![0].original).toBe(200);
+    expect(enrichment.datesClamped![0].clamped).toBe(120);
   });
 
   // Issue #12: description accuracy (regression guard — the description text is read in catalog tests)

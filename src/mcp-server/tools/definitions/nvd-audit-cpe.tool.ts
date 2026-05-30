@@ -184,21 +184,23 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         CveRecordSchema.describe('Full CVE record for one vulnerability affecting the product.'),
       )
       .describe('Full CVE records for CVEs affecting the specified product.'),
-    queryMeta: z
-      .object({
-        totalResults: z.number().describe('Total CVEs matched before pagination.'),
-        returned: z.number().describe('Number of CVE records returned.'),
-        cpeName: z
-          .string()
-          .optional()
-          .describe('The exact CPE name used in the query, if provided.'),
-        virtualMatchString: z
-          .string()
-          .optional()
-          .describe('The virtual match string used, if provided.'),
-      })
-      .describe('Query metadata echoing the CPE identifier and match counts for the audit.'),
   }),
+
+  enrichment: {
+    totalResults: z.number().describe('Total CVEs matched before pagination.'),
+    returned: z.number().describe('Number of CVE records returned.'),
+    auditTarget: z.string().describe('The CPE name or virtual match string used for this audit.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when no CVEs were found — suggests verifying the CPE name.'),
+  },
+
+  enrichmentTrailer: {
+    totalResults: { label: 'Total CVEs' },
+    returned: { label: 'Returned' },
+    auditTarget: { label: 'Audit Target' },
+  },
 
   errors: [
     {
@@ -305,32 +307,26 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       ctx,
     );
 
-    return {
-      cves: result.cves,
-      queryMeta: {
-        totalResults: result.totalResults,
-        returned: result.returned,
-        ...(result.cpeName && { cpeName: result.cpeName }),
-        ...(result.virtualMatchString && { virtualMatchString: result.virtualMatchString }),
-      },
-    };
+    const auditTarget = result.cpeName ?? result.virtualMatchString ?? 'unknown CPE';
+    ctx.enrich({
+      totalResults: result.totalResults,
+      returned: result.returned,
+      auditTarget,
+    });
+    if (result.cves.length === 0) {
+      ctx.enrich.notice(
+        'No CVEs found for this product. Verify the CPE name with nvd_search_cpes.',
+      );
+    }
+
+    return { cves: result.cves };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    const cpeName = result.queryMeta.cpeName;
-    const virtualMatchString = result.queryMeta.virtualMatchString;
-    const target = cpeName ?? virtualMatchString ?? 'unknown CPE';
-    lines.push(`**CPE Audit:** ${target}`);
-    if (cpeName) lines.push(`**CPE Name:** ${cpeName}`);
-    if (virtualMatchString) lines.push(`**Virtual Match String:** ${virtualMatchString}`);
-    lines.push(
-      `**Total CVEs:** ${result.queryMeta.totalResults} | **Returned:** ${result.queryMeta.returned}\n`,
-    );
 
     if (result.cves.length === 0) {
-      lines.push('No CVEs found for this product. Verify the CPE name with nvd_search_cpes.');
-      return [{ type: 'text', text: lines.join('\n') }];
+      return [{ type: 'text', text: 'No CVEs returned for this product.' }];
     }
 
     for (const cve of result.cves) {

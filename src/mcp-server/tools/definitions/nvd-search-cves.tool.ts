@@ -133,31 +133,47 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     cves: z
       .array(BriefCveRecordSchema.describe('Brief summary for one matching CVE.'))
       .describe('Matching CVE summaries. Call nvd_get_cve for full detail on specific IDs.'),
-    queryMeta: z
-      .object({
-        totalResults: z.number().describe('Total matching CVEs in NVD before pagination.'),
-        returned: z.number().describe('Number of CVEs returned in this response.'),
-        offset: z.number().describe('Page offset used in this query.'),
-        datesClamped: z
-          .array(
-            z
-              .object({
-                param: z
-                  .string()
-                  .describe('The parameter that was clamped (pubDays or lastModDays).'),
-                original: z.number().describe('The original value supplied.'),
-                clamped: z.number().describe('The clamped value used (max 120).'),
-              })
-              .describe('A single clamping event for one convenience date parameter.'),
-          )
-          .optional()
-          .describe(
-            'Entries for any pubDays/lastModDays values that exceeded 120 and were auto-clamped. ' +
-              'Absent when no clamping occurred.',
-          ),
-      })
-      .describe('Query execution metadata including total count and any date clamping applied.'),
   }),
+
+  enrichment: {
+    totalResults: z.number().describe('Total matching CVEs in NVD before pagination.'),
+    returned: z.number().describe('Number of CVEs returned in this response.'),
+    offset: z.number().describe('Page offset used in this query.'),
+    datesClamped: z
+      .array(
+        z
+          .object({
+            param: z.string().describe('The parameter that was clamped (pubDays or lastModDays).'),
+            original: z.number().describe('The original value supplied.'),
+            clamped: z.number().describe('The clamped value used (max 120).'),
+          })
+          .describe('A single clamping event for one convenience date parameter.'),
+      )
+      .optional()
+      .describe(
+        'Entries for any pubDays/lastModDays values that exceeded 120 and were auto-clamped. ' +
+          'Absent when no clamping occurred.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when no CVEs matched or the page offset is past the result set.'),
+  },
+
+  enrichmentTrailer: {
+    totalResults: { label: 'Total Results' },
+    returned: { label: 'Returned' },
+    offset: { label: 'Offset' },
+    datesClamped: {
+      render: (clamped) =>
+        clamped
+          ?.map(
+            (c) =>
+              `> **Note:** ${c.param} value ${c.original} exceeded the 120-day maximum and was clamped to ${c.clamped}.`,
+          )
+          .join('\n') ?? '',
+    },
+  },
 
   errors: [
     {
@@ -397,47 +413,33 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       ctx,
     );
 
-    return {
-      cves: result.cves,
-      queryMeta: {
-        totalResults: result.totalResults,
-        returned: result.returned,
-        offset: result.offset,
-        ...(datesClamped.length > 0 && { datesClamped }),
-      },
-    };
+    ctx.enrich({
+      totalResults: result.totalResults,
+      returned: result.returned,
+      offset: result.offset,
+      ...(datesClamped.length > 0 && { datesClamped }),
+    });
+    if (result.cves.length === 0) {
+      if (result.totalResults > 0) {
+        ctx.enrich.notice(
+          `Offset ${result.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          'No CVEs matched the search criteria. Try broadening the keyword or date range.',
+        );
+      }
+    }
+
+    return { cves: result.cves };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(
-      `**Total:** ${result.queryMeta.totalResults} matching CVEs | ` +
-        `**Showing:** ${result.queryMeta.returned} (offset ${result.queryMeta.offset})`,
-    );
-
-    if (result.queryMeta.datesClamped && result.queryMeta.datesClamped.length > 0) {
-      for (const c of result.queryMeta.datesClamped) {
-        lines.push(
-          `> **Note:** ${c.param} value ${c.original} exceeded the 120-day maximum and was clamped to ${c.clamped}.`,
-        );
-      }
-    }
 
     if (result.cves.length === 0) {
-      if (result.queryMeta.totalResults > 0) {
-        lines.push(
-          `\nOffset ${result.queryMeta.offset} is past the end of the result set ` +
-            `(${result.queryMeta.totalResults} total). Use a lower offset to page through results.`,
-        );
-      } else {
-        lines.push(
-          '\nNo CVEs matched the search criteria. Try broadening the keyword or date range.',
-        );
-      }
-      return [{ type: 'text', text: lines.join('\n') }];
+      return [{ type: 'text', text: 'No CVEs returned.' }];
     }
-
-    lines.push('');
 
     for (const cve of result.cves) {
       lines.push(`### ${cve.cveId}`);
