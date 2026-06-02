@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-05-29 03:37:35
+Generated on: 2026-06-02 14:26:50
 
 ```text
 nist-nvd-mcp-server/
@@ -29,12 +29,14 @@ nist-nvd-mcp-server/
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   └── tree.ts
 ├── skills/
 │   ├── add-app-tool/
@@ -60,6 +62,8 @@ nist-nvd-mcp-server/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -88,6 +92,13 @@ nist-nvd-mcp-server/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -141,13 +152,16 @@ nist-nvd-mcp-server/
 │   ├── resources/
 │   │   └── nvd-cve.resource.test.ts
 │   ├── services/
+│   │   ├── nvd-cpe-service.test.ts
+│   │   ├── nvd-cve-normalization.test.ts
 │   │   └── nvd-cve-service.test.ts
-│   └── tools/
-│       ├── nvd-audit-cpe.tool.test.ts
-│       ├── nvd-get-cve-history.tool.test.ts
-│       ├── nvd-get-cve.tool.test.ts
-│       ├── nvd-search-cpes.tool.test.ts
-│       └── nvd-search-cves.tool.test.ts
+│   ├── tools/
+│   │   ├── nvd-audit-cpe.tool.test.ts
+│   │   ├── nvd-get-cve-history.tool.test.ts
+│   │   ├── nvd-get-cve.tool.test.ts
+│   │   ├── nvd-search-cpes.tool.test.ts
+│   │   └── nvd-search-cves.tool.test.ts
+│   └── security.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
