@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-06-04
+
+Fix false errors from empty results in nvd_audit_cpe and nvd_get_cve_history
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-02
 
 mcp-ts-core 0.9.21 — per-request log context fix, secret-stripped error messages, fail-fast retries
