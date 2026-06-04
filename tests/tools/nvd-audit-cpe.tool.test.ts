@@ -259,4 +259,26 @@ describe('nvdAuditCpe', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('nvd_search_cpes');
   });
+
+  it('returns structured empty success when severityMin filters out all NVD results (issue #17)', async () => {
+    // Service returns cves=[] but totalResults=3: NVD had results, severity filter removed them all.
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 3,
+      returned: 0,
+      cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
+      severityMin: 'CRITICAL',
+    });
+    const result = await nvdAuditCpe.handler(input, ctx);
+
+    expect(result.cves).toHaveLength(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalResults).toBe(3);
+    expect(enrichment.returned).toBe(0);
+    expect(enrichment.notice).toContain('nvd_search_cpes');
+  });
 });

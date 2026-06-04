@@ -233,7 +233,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     {
       reason: 'cpe_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The cpeName is valid format but NVD returns no matching CVEs — the CPE may be misspelled or absent from NVD.',
+      when: 'NVD itself returned zero results (totalResults === 0) for the given cpeName — the CPE is likely misspelled or absent from NVD.',
       recovery:
         'Use nvd_search_cpes to verify the exact CPE name exists in the NVD dictionary before auditing.',
     },
