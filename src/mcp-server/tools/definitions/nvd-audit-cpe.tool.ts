@@ -187,7 +187,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   }),
 
   enrichment: {
-    totalResults: z.number().describe('Total CVEs matched before pagination.'),
+    totalCount: z.number().describe('Total CVEs matched before pagination.'),
     returned: z.number().describe('Number of CVE records returned.'),
     auditTarget: z.string().describe('The CPE name or virtual match string used for this audit.'),
     notice: z
@@ -197,7 +197,6 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   },
 
   enrichmentTrailer: {
-    totalResults: { label: 'Total CVEs' },
     returned: { label: 'Returned' },
     auditTarget: { label: 'Audit Target' },
   },
@@ -309,10 +308,10 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
 
     const auditTarget = result.cpeName ?? result.virtualMatchString ?? 'unknown CPE';
     ctx.enrich({
-      totalResults: result.totalResults,
       returned: result.returned,
       auditTarget,
     });
+    ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
       ctx.enrich.notice(
         'No CVEs found for this product. Verify the CPE name with nvd_search_cpes.',

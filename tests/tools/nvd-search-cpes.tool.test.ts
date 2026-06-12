@@ -54,7 +54,7 @@ describe('nvdSearchCpes', () => {
     expect(result.cpes[0].deprecated).toBe(false);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.totalCount).toBe(1);
     expect(enrichment.returned).toBe(1);
   });
 
@@ -106,7 +106,7 @@ describe('nvdSearchCpes', () => {
 
     expect(result.cpes).toHaveLength(0);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(0);
+    expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toContain('No CPEs matched');
   });
 

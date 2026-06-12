@@ -99,7 +99,7 @@ describe('nvdAuditCpe', () => {
     expect(result.cves[0].cveId).toBe('CVE-2021-44228');
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.totalCount).toBe(1);
     expect(enrichment.auditTarget).toBe('cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*');
   });
 
@@ -277,7 +277,7 @@ describe('nvdAuditCpe', () => {
 
     expect(result.cves).toHaveLength(0);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(3);
+    expect(enrichment.totalCount).toBe(3);
     expect(enrichment.returned).toBe(0);
     expect(enrichment.notice).toContain('nvd_search_cpes');
   });

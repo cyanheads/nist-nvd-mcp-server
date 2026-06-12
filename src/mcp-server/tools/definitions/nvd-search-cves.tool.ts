@@ -136,7 +136,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   }),
 
   enrichment: {
-    totalResults: z.number().describe('Total matching CVEs in NVD before pagination.'),
+    totalCount: z.number().describe('Total matching CVEs in NVD before pagination.'),
     returned: z.number().describe('Number of CVEs returned in this response.'),
     offset: z.number().describe('Page offset used in this query.'),
     datesClamped: z
@@ -161,7 +161,6 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   },
 
   enrichmentTrailer: {
-    totalResults: { label: 'Total Results' },
     returned: { label: 'Returned' },
     offset: { label: 'Offset' },
     datesClamped: {
@@ -414,11 +413,11 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     );
 
     ctx.enrich({
-      totalResults: result.totalResults,
       returned: result.returned,
       offset: result.offset,
       ...(datesClamped.length > 0 && { datesClamped }),
     });
+    ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
       if (result.totalResults > 0) {
         ctx.enrich.notice(

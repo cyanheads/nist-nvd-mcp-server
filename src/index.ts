@@ -20,6 +20,8 @@ import { initNvdCveService } from './services/nvd-cve/nvd-cve-service.js';
 import { initNvdHttpClient } from './services/nvd-http/nvd-http-client.js';
 
 await createApp({
+  name: 'nist-nvd-mcp-server',
+  title: 'nist-nvd-mcp-server',
   tools: [nvdGetCve, nvdSearchCves, nvdAuditCpe, nvdSearchCpes, nvdGetCveHistory],
   resources: [nvdCveResource],
   prompts: [],

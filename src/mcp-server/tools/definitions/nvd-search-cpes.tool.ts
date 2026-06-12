@@ -75,7 +75,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   }),
 
   enrichment: {
-    totalResults: z.number().describe('Total matching CPE entries before the limit was applied.'),
+    totalCount: z.number().describe('Total matching CPE entries before the limit was applied.'),
     returned: z.number().describe('Number of entries returned in this response.'),
     notice: z
       .string()
@@ -84,7 +84,6 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   },
 
   enrichmentTrailer: {
-    totalResults: { label: 'Total Results' },
     returned: { label: 'Returned' },
   },
 
@@ -146,7 +145,8 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       ctx,
     );
 
-    ctx.enrich({ totalResults: result.totalResults, returned: result.returned });
+    ctx.enrich({ returned: result.returned });
+    ctx.enrich.total(result.totalResults);
     if (result.cpes.length === 0) {
       ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');
     } else if (result.totalResults > result.returned) {

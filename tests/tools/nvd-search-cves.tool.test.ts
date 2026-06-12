@@ -46,7 +46,7 @@ describe('nvdSearchCves', () => {
     expect(result.cves[0].cveId).toBe('CVE-2021-44228');
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(1);
+    expect(enrichment.totalCount).toBe(1);
     expect(enrichment.returned).toBe(1);
     expect(enrichment.offset).toBe(0);
     expect(enrichment.datesClamped).toBeUndefined();
@@ -60,7 +60,7 @@ describe('nvdSearchCves', () => {
 
     expect(result.cves).toHaveLength(0);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalResults).toBe(0);
+    expect(enrichment.totalCount).toBe(0);
   });
 
   it('clamps pubDays over 120 and reports clamping in enrichment', async () => {
