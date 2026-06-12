@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-12
+
+mcp-ts-core 0.10.6 — enrichment total() helper, explicit createApp identity, Docker healthcheck, MCPB agent-doc strip
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-06-04
 
 Fix false errors from empty results in nvd_audit_cpe and nvd_get_cve_history

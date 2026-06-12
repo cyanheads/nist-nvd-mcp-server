@@ -1,8 +1,8 @@
 # Developer Protocol
 
 **Server:** nist-nvd-mcp-server
-**Version:** 0.1.10
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
+**Version:** 0.1.11
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.6`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -76,7 +76,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   errors: [
     {
       reason: 'missing_search_input',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Neither keyword nor cpeMatchString was provided.',
       recovery: 'Provide at least one of keyword or cpeMatchString.',
     },
