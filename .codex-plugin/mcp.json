@@ -1,5 +1,5 @@
 {
-  "@cyanheads/nist-nvd-mcp-server": {
+  "nist-nvd-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/nist-nvd-mcp-server"],
     "env": {
