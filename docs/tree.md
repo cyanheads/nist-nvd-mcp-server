@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-06-12 08:32:15
+Generated on: 2026-06-20 11:59:23
 
 ```text
 nist-nvd-mcp-server/
@@ -27,6 +27,7 @@ nist-nvd-mcp-server/
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts

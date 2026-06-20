@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-06-20
+
+mcp-ts-core ^0.10.9 maintenance — vendored framework skills/scripts resynced (check-dependency-specifiers, plugin-manifest packaging checks), dev-dep refresh. No server behavior change.
+
 ## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-12
 
 mcp-ts-core 0.10.6 — enrichment total() helper, explicit createApp identity, Docker healthcheck, MCPB agent-doc strip
