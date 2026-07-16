@@ -54,6 +54,61 @@ const FULL_CVE: CveRecord = {
   },
 };
 
+/**
+ * Shape NVD uses when a group AND-combines its nodes: a vulnerable firmware node plus the
+ * hardware it runs on, which must both match. Mirrors CVE-2022-1292's NetApp groups.
+ */
+const AND_GROUP_CVE: CveRecord = {
+  cveId: 'CVE-2022-1292',
+  vulnStatus: 'Analyzed',
+  published: '2022-05-03T00:00:00.000',
+  lastModified: '2023-01-01T00:00:00.000',
+  descriptions: [{ lang: 'en', value: 'c_rehash script command injection.' }],
+  cvssScores: [],
+  weaknesses: [],
+  configurations: [
+    {
+      operator: 'AND',
+      nodes: [
+        {
+          operator: 'OR',
+          cpeMatch: [
+            { vulnerable: true, criteria: 'cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*' },
+          ],
+        },
+        {
+          operator: 'OR',
+          cpeMatch: [{ vulnerable: false, criteria: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*' }],
+        },
+      ],
+    },
+  ],
+};
+
+/** Eight CPE matches in one node — two past the five-per-CVE render cap. */
+const MANY_MATCH_CVE: CveRecord = {
+  cveId: 'CVE-2021-44224',
+  vulnStatus: 'Analyzed',
+  published: '2021-12-20T00:00:00.000',
+  lastModified: '2023-01-01T00:00:00.000',
+  descriptions: [],
+  cvssScores: [],
+  weaknesses: [],
+  configurations: [
+    {
+      nodes: [
+        {
+          operator: 'OR',
+          cpeMatch: Array.from({ length: 8 }, (_, i) => ({
+            vulnerable: true,
+            criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
+          })),
+        },
+      ],
+    },
+  ],
+};
+
 const SPARSE_CVE: CveRecord = {
   cveId: 'CVE-2022-11111',
   vulnStatus: 'Awaiting Analysis',
@@ -199,6 +254,40 @@ describe('nvdAuditCpe', () => {
     expect(text).toContain('CWE-20');
     expect(text).toContain('Apache Log4j2 JNDI vulnerability');
     expect(text).toContain('Apache Log4j2 Remote Code Execution Vulnerability');
+  });
+
+  // Issue #22: the Configurations block rendered bare operator lines and no CPE data.
+  it('renders CPE match criteria and version bounds instead of bare operator lines', () => {
+    const blocks = nvdAuditCpe.format!({ cves: [FULL_CVE] });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*');
+    expect(text).toContain('>= 2.0');
+    expect(text).toContain('< 2.15.0');
+    expect(text).toContain('1 node group(s), 1 CPE match(es)');
+    // The operator now qualifies a real criteria line rather than standing alone.
+    expect(text).not.toMatch(/^\s*-\s*Operator:/m);
+  });
+
+  it('renders the group-level operator and flags non-vulnerable context matches', () => {
+    const blocks = nvdAuditCpe.format!({ cves: [AND_GROUP_CVE] });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*');
+    // The AND is what marks the two nodes as jointly required rather than alternatives.
+    expect(text).toContain('AND with sibling nodes');
+    expect(text).toContain('not the vulnerable component');
+  });
+
+  it('caps CPE matches at five per CVE and trails with the omitted count', () => {
+    const blocks = nvdAuditCpe.format!({ cves: [MANY_MATCH_CVE] });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('1 node group(s), 8 CPE match(es)');
+    expect(text).toContain('… 3 more');
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(5);
+    // The trailer names what was dropped — the last three are not silently missing.
+    expect(text).not.toContain('fedora:37');
   });
 
   it('formats sparse CVE without severity using "Not available"', () => {

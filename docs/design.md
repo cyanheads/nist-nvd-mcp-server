@@ -56,7 +56,7 @@ Primary audience: security-focused agents performing risk assessment, dependency
 | `NvdCveService` | NVD CVE API 2.0 + CVE History API | `nvd_get_cve`, `nvd_search_cves`, `nvd_audit_cpe`, `nvd_get_cve_history`, `nvd://cve/{cveId}` resource |
 | `NvdCpeService` | NVD CPE API 2.0 | `nvd_search_cpes`, `nvd_audit_cpe` (for CPE discovery leg) |
 
-Both services share a common HTTP layer with rate-limit queuing. A single `NvdHttpClient` handles queue management, API key injection, retry with backoff, and `Retry-After` header parsing. The two API services delegate network calls to this client.
+Both services share a common HTTP layer with rate-limit queuing. A single `NvdHttpClient` handles queue management, API key injection, retry with backoff (every attempt paced through the queue), and `Retry-After` header parsing. The two API services delegate network calls to this client.
 
 ---
 
@@ -160,7 +160,15 @@ The NVD API enforces a 120-day maximum range. If either param exceeds 120, the t
 
 ### Rate limiting: queue, not per-call sleep
 
-The NVD enforces sliding window rate limits (5 or 50 requests per 30-second window). The service layer uses a token-bucket queue rather than per-call sleeps so burst requests from a tool like `nvd_get_cve` (which could fan out to multiple API pages) are queued correctly rather than racing. Without a key, the effective throughput is one request per 6 seconds — agents should be aware they may wait for queued requests.
+The NVD enforces sliding window rate limits (5 or 50 requests per 30-second window). The service layer paces requests through a single queue enforcing a minimum inter-request gap, rather than per-call sleeps, so burst requests from a tool like `nvd_get_cve` (which could fan out to multiple API pages) are queued correctly rather than racing. Without a key, the effective throughput is one request per 6 seconds — agents should be aware they may wait for queued requests.
+
+**Retry wraps the queue rather than sitting inside it.** Every attempt — the first try and each retry — is enqueued separately and takes its own turn, so a retrying call spends its retries against the same budget as any other request. The alternative (retrying inside one queue slot) lets a single call fire its whole retry fan-out unpaced, which is how a lone transient failure used to exhaust the keyless budget and self-inflict 403s.
+
+**A 403 holds the queue, and only one wait fits inside a call.** The parsed `Retry-After` (~30s) blocks every pending request until NVD's window resets, not just the retrying one. That wait is half the MCP client's 60s request deadline, so at most one fits inside a call: a keyed call spends it on a single patient retry, while a keyless call — whose 5-request budget cannot spare it — fails fast and names `NVD_API_KEY`. Retrying a keyless 403 on the 2s exponential can never clear a 30s window, so it only burns budget before failing anyway. For the same reason keyless calls retry other transient failures once rather than three times.
+
+**Deterministic rejections are never retried.** NVD answers a 404 with an empty body and its diagnosis in a `message` response header. The client throws it as an `McpError` carrying `data.retryable === false` (the framework's opt-out) so `withRetry` fails fast instead of re-sending a request that cannot succeed. Callers key off that error shape via `isNvdRequestRejected()` rather than matching the message text.
+
+That 404 covers two unrelated faults, and only the `message` header separates them: a rejected parameter (`Invalid cveId parameter.`, `Invalid cpeName parameter, see documentation.`) versus a refused API key (`Invalid apiKey.`). The client splits them — a refused key raises `ConfigurationError` / `nvd_invalid_api_key` naming `NVD_API_KEY`, everything else raises `ValidationError` / `nvd_request_rejected` carrying NVD's own wording. Collapsing the two would tell a caller its CVE ID is malformed when the ID is fine and the key is the fault, sending it to correct something that can never succeed.
 
 ---
 
@@ -232,7 +240,7 @@ errors: [
     when: 'Valid-format ID returns HTTP 200 with empty vulnerabilities array — ID is well-formed but does not exist in NVD. Distinct from format error.',
     retryable: false },
   { reason: 'rate_limited', code: 'ServiceUnavailable',
-    when: 'HTTP 403 with Retry-After header. Service layer queues and retries automatically; this surfaces only if the queue is exhausted.',
+    when: 'HTTP 403 with Retry-After header. The parsed Retry-After holds the queue until NVD window reset; a keyed call spends one patient retry on it, a keyless call fails fast and names NVD_API_KEY.',
     retryable: true },
 ]
 ```
@@ -300,6 +308,10 @@ Exactly one of `cpeName` or `virtualMatchString` is required.
 - `cves: CveRecord[]` — full CVE records (this is a targeted audit, not a search — full detail is appropriate)
 - `queryMeta: { totalResults: number, returned: number, cpeName?: string, virtualMatchString?: string }` — echoes the CPE identifier used so the caller can verify the right product was queried
 
+**Configurations rendering.** `structuredContent` always carries the whole configuration tree. The formatted text renders each CVE's CPE match criteria — the criteria string, its version bounds, whether the CPE is the vulnerable component or only the context it runs in, and the operators combining it — capped at the first 5 per CVE with a `… N more` trailer, matching the cap this formatter already applies to `references`. The cap is what keeps the block bounded: `limit` accepts up to 2000 CVEs, and a single complex CVE can carry dozens of criteria (CVE-2021-44224 has 37 across 7 node groups — 2,727 bytes rendered in full versus 373 capped).
+
+Both operators are rendered because they mean different things: a node's operator combines that node's own matches, while a group's operator combines its sibling nodes — an `AND` there marks conditions that must hold together (a firmware match plus the hardware it runs on), which reads as two unrelated alternatives if dropped.
+
 **Errors:**
 ```
 errors: [
@@ -316,7 +328,7 @@ errors: [
     when: 'cpeName is a valid format but NVD returns no matching CVEs — the CPE may be misspelled or not in NVD. Use nvd_search_cpes to verify.',
     retryable: false },
   { reason: 'rate_limited', code: 'ServiceUnavailable',
-    when: 'HTTP 403 with Retry-After; queue exhausted.',
+    when: 'HTTP 403 with Retry-After. Keyed: one patient retry across the window. Keyless: fails fast naming NVD_API_KEY.',
     retryable: true },
 ]
 ```

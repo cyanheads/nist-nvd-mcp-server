@@ -23,6 +23,49 @@ const TopSeveritySchema = z.object({
   fromVersion: z.string().describe('Which CVSS version this top score came from.'),
 });
 
+const CpeMatchSchema = z.object({
+  vulnerable: z
+    .boolean()
+    .describe('Whether this CPE is the vulnerable component or only the context it runs in.'),
+  criteria: z.string().describe('CPEv2.3 match criteria string.'),
+  versionStartIncluding: z.string().optional().describe('Inclusive lower version bound.'),
+  versionStartExcluding: z.string().optional().describe('Exclusive lower version bound.'),
+  versionEndIncluding: z.string().optional().describe('Inclusive upper version bound.'),
+  versionEndExcluding: z.string().optional().describe('Exclusive upper version bound.'),
+});
+
+/** Cap on CPE match criteria rendered per CVE — mirrors the references cap in this formatter. */
+const CPE_MATCH_CAP = 5;
+
+/**
+ * Render one CPE match as a single line: the criteria string, its version bounds, and the
+ * operators that govern it. `nodeOperator` combines the matches inside a node; `groupOperator`
+ * combines sibling nodes in the group, so an `AND` there marks conditions that hold together
+ * (e.g. a firmware match and the hardware it runs on) rather than independent alternatives.
+ */
+function formatCpeMatch(
+  match: z.infer<typeof CpeMatchSchema>,
+  groupOperator: string | undefined,
+  nodeOperator: string | undefined,
+): string {
+  const bounds = [
+    match.versionStartIncluding && `>= ${match.versionStartIncluding}`,
+    match.versionStartExcluding && `> ${match.versionStartExcluding}`,
+    match.versionEndIncluding && `<= ${match.versionEndIncluding}`,
+    match.versionEndExcluding && `< ${match.versionEndExcluding}`,
+  ].filter(Boolean);
+  const notes = [
+    nodeOperator,
+    groupOperator && `${groupOperator} with sibling nodes`,
+    match.vulnerable ? undefined : 'not the vulnerable component',
+  ].filter(Boolean);
+  return (
+    `${match.criteria}` +
+    (bounds.length > 0 ? ` (${bounds.join(', ')})` : '') +
+    (notes.length > 0 ? ` [${notes.join('; ')}]` : '')
+  );
+}
+
 const CveRecordSchema = z.object({
   cveId: z.string().describe('CVE identifier (e.g., "CVE-2021-44228").'),
   vulnStatus: z.string().describe('NVD analysis status.'),
@@ -60,38 +103,22 @@ const CveRecordSchema = z.object({
     .array(
       z
         .object({
+          operator: z
+            .string()
+            .optional()
+            .describe(
+              'Logical operator (AND/OR) combining this group\'s sibling nodes. An "AND" means every node must match for the CVE to apply — e.g. a firmware node and the hardware it runs on. Absent when the group has nothing to combine.',
+            ),
           nodes: z
             .array(
               z
                 .object({
-                  operator: z.string().optional().describe('Logical operator (AND/OR).'),
+                  operator: z
+                    .string()
+                    .optional()
+                    .describe("Logical operator (AND/OR) combining this node's own CPE matches."),
                   cpeMatch: z
-                    .array(
-                      z
-                        .object({
-                          vulnerable: z
-                            .boolean()
-                            .describe('Whether this CPE is the vulnerable component.'),
-                          criteria: z.string().describe('CPEv2.3 match criteria string.'),
-                          versionStartIncluding: z
-                            .string()
-                            .optional()
-                            .describe('Inclusive lower version bound.'),
-                          versionStartExcluding: z
-                            .string()
-                            .optional()
-                            .describe('Exclusive lower version bound.'),
-                          versionEndIncluding: z
-                            .string()
-                            .optional()
-                            .describe('Inclusive upper version bound.'),
-                          versionEndExcluding: z
-                            .string()
-                            .optional()
-                            .describe('Exclusive upper version bound.'),
-                        })
-                        .describe('One CPE match criterion.'),
-                    )
+                    .array(CpeMatchSchema.describe('One CPE match criterion.'))
                     .describe('CPE match criteria for this node.'),
                 })
                 .describe('One configuration node with its CPE match criteria.'),
@@ -375,11 +402,17 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       }
 
       if (cve.configurations && cve.configurations.length > 0) {
-        lines.push(`**Configurations:** ${cve.configurations.length} node group(s)`);
-        for (const cfg of cve.configurations) {
-          for (const node of cfg.nodes) {
-            if (node.operator) lines.push(`  - Operator: ${node.operator}`);
-          }
+        const matches = cve.configurations.flatMap((cfg) =>
+          cfg.nodes.flatMap((node) =>
+            node.cpeMatch.map((m) => formatCpeMatch(m, cfg.operator, node.operator)),
+          ),
+        );
+        lines.push(
+          `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
+        );
+        for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
+        if (matches.length > CPE_MATCH_CAP) {
+          lines.push(`  - … ${matches.length - CPE_MATCH_CAP} more`);
         }
       }
 

@@ -24,6 +24,8 @@ export interface RawCveItem {
   cisaRequiredAction?: string;
   cisaVulnerabilityName?: string;
   configurations?: Array<{
+    /** Combines this group's sibling nodes — an `AND` means every node must match. */
+    operator?: string;
     nodes?: Array<{
       operator?: string;
       negate?: boolean;
@@ -127,7 +129,10 @@ export interface CisaKev {
 export interface CveRecord {
   cisaKev?: CisaKev;
   configurations: Array<{
+    /** Combines this group's sibling nodes — an `AND` means every node must match. */
+    operator?: string;
     nodes: Array<{
+      /** Combines this node's own cpeMatch entries. */
       operator?: string;
       cpeMatch: Array<{
         vulnerable: boolean;
