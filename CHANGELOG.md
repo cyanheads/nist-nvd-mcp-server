@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-16
+
+Filter context (filtersApplied, severityMin/filteredCount) and per-row filteredSeverity now surface why a nvd_search_cves or nvd_audit_cpe result set is narrow or empty; full-record descriptions default to English with an allLanguages opt-in; rate_limited corrected to declare RateLimited across all five tools.
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-15
 
 NVD retries now pace through the rate-limit queue instead of bursting inside it, and nvd_audit_cpe renders CPE match criteria instead of bare operator lines. mcp-ts-core ^0.10.14, Socket install scanning, 8 transitive advisories cleared.

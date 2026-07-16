@@ -1,6 +1,6 @@
 {
   "name": "nist-nvd-mcp-server",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
