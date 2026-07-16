@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-15
+
+NVD retries now pace through the rate-limit queue instead of bursting inside it, and nvd_audit_cpe renders CPE match criteria instead of bare operator lines. mcp-ts-core ^0.10.14, Socket install scanning, 8 transitive advisories cleared.
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-06-20
 
 mcp-ts-core ^0.10.9 maintenance — vendored framework skills/scripts resynced (check-dependency-specifiers, plugin-manifest packaging checks), dev-dep refresh. No server behavior change.

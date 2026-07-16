@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 11:59:23
+Generated on: 2026-07-16 05:19:42
 
 ```text
 nist-nvd-mcp-server/
@@ -14,7 +14,8 @@ nist-nvd-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
-│   └── FUNDING.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -160,7 +161,8 @@ nist-nvd-mcp-server/
 │   ├── services/
 │   │   ├── nvd-cpe-service.test.ts
 │   │   ├── nvd-cve-normalization.test.ts
-│   │   └── nvd-cve-service.test.ts
+│   │   ├── nvd-cve-service.test.ts
+│   │   └── nvd-http-client.test.ts
 │   ├── tools/
 │   │   ├── nvd-audit-cpe.tool.test.ts
 │   │   ├── nvd-get-cve-history.tool.test.ts
@@ -170,6 +172,7 @@ nist-nvd-mcp-server/
 │   └── security.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

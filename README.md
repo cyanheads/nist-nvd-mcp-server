@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/nist-nvd-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/nist-nvd-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/nist-nvd-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/nist-nvd-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/nist-nvd-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/nist-nvd-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -119,9 +119,10 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 NVD-specific:
 
-- Token-bucket rate limiter enforces NVD's 5 req/30s (no key) and 50 req/30s (with key) limits with automatic queuing
-- Sliding-window minimum inter-request gap derived from the window and limit — no burst, no 403s
-- Automatic retry with backoff via `withRetry`; parses `Retry-After` header on 403 responses
+- Request pacer enforces NVD's 5 req/30s (no key) and 50 req/30s (with key) limits with automatic queuing, at a minimum inter-request gap derived from the window and limit
+- Retry wraps the pacer rather than sitting inside it — every attempt takes its own turn in the queue, so retries count against the rate budget instead of bursting past it
+- A 403's `Retry-After` holds the whole queue until NVD's window resets. Keyless, a 403 fails fast and names `NVD_API_KEY` rather than spending a 5-request budget on retries that cannot outlast a 30-second window
+- Deterministic rejections fail fast instead of consuming retries. NVD answers both a bad parameter and a refused API key with HTTP 404, separated only by a `message` header — a refused key surfaces as a config fault naming `NVD_API_KEY` rather than as a malformed CVE ID
 - HTML-response guard catches NVD rate-limit pages served as HTML instead of 403
 
 Agent-friendly output:
@@ -284,7 +285,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
-| `src/services/nvd-http` | NVD HTTP client with token-bucket rate limiting and retry. |
+| `src/services/nvd-http` | NVD HTTP client with rate-limit pacing and retry. |
 | `src/services/nvd-cve` | CVE service — search, fetch-by-ID, CPE audit, change history, normalization. |
 | `src/services/nvd-cpe` | CPE service — dictionary search and normalization. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
