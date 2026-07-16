@@ -3,6 +3,7 @@
  * @module tests/tools/nvd-search-cpes.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
@@ -191,5 +192,11 @@ describe('nvdSearchCpes', () => {
     const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:apache:http_server' });
     const result = await nvdSearchCpes.handler(input, ctx);
     expect(result.cpes).toHaveLength(1);
+  });
+
+  // Issue #25: the advertised rate_limited code must match the client's thrown RateLimited.
+  it('declares rate_limited with the RateLimited error code', () => {
+    const entry = nvdSearchCpes.errors?.find((e) => e.reason === 'rate_limited');
+    expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
 });

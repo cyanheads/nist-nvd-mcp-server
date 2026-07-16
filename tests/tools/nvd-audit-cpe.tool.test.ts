@@ -3,6 +3,7 @@
  * @module tests/tools/nvd-audit-cpe.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -349,12 +350,14 @@ describe('nvdAuditCpe', () => {
     expect(enrichment.notice).toContain('nvd_search_cpes');
   });
 
-  it('returns structured empty success when severityMin filters out all NVD results (issue #17)', async () => {
-    // Service returns cves=[] but totalResults=3: NVD had results, severity filter removed them all.
+  it('returns structured empty success when severityMin filters out all NVD results (issues #17, #19)', async () => {
+    // cves=[] with totalResults=3 and filteredCount=3: NVD had results, the severity filter
+    // removed them all. Empty success, not an error — and the notice names the severity drop.
     mockService.auditCpe.mockResolvedValue({
       cves: [],
       totalResults: 3,
       returned: 0,
+      filteredCount: 3,
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
     });
     const ctx = createMockContext();
@@ -368,6 +371,85 @@ describe('nvdAuditCpe', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(3);
     expect(enrichment.returned).toBe(0);
+    expect(enrichment.severityMin).toBe('CRITICAL');
+    expect(enrichment.filteredCount).toBe(3);
+    // #19: the notice distinguishes a severity drop from an unknown CPE — it must NOT send the
+    // agent to re-check the CPE spelling when the CPE was fine and the threshold did the cutting.
+    expect(enrichment.notice).toContain('CRITICAL');
+    expect(enrichment.notice).not.toContain('nvd_search_cpes');
+  });
+
+  it('surfaces severityMin and filteredCount enrichment when results pass the filter (issue #19)', async () => {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [FULL_CVE],
+      totalResults: 5,
+      returned: 1,
+      filteredCount: 2,
+      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+      severityMin: 'HIGH',
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.severityMin).toBe('HIGH');
+    expect(enrichment.filteredCount).toBe(2);
+  });
+
+  it('keeps the unknown-CPE notice when severityMin dropped nothing on an empty page (issue #19)', async () => {
+    // virtualMatchString with an empty page: filteredCount 0 means the filter cut nothing, so the
+    // right guidance is to verify the CPE, not to blame the severity threshold.
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 0,
+      returned: 0,
+      filteredCount: 0,
+      virtualMatchString: 'cpe:2.3:a:nonexistent:product:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      virtualMatchString: 'cpe:2.3:a:nonexistent:product:*',
+      severityMin: 'HIGH',
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('nvd_search_cpes');
+  });
+
+  it('omits severityMin and filteredCount enrichment when no severityMin was set', async () => {
+    mockService.auditCpe.mockResolvedValue(makeAuditResult());
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.severityMin).toBeUndefined();
+    expect(enrichment.filteredCount).toBeUndefined();
+  });
+
+  // Issue #23: allLanguages must reach the service, not sit as a dead input.
+  it('threads allLanguages through to the service when set', async () => {
+    mockService.auditCpe.mockResolvedValue(makeAuditResult());
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+      allLanguages: true,
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const params = mockService.auditCpe.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.allLanguages).toBe(true);
+  });
+
+  // Issue #25: the advertised rate_limited code must match the client's thrown RateLimited.
+  it('declares rate_limited with the RateLimited error code', () => {
+    const entry = nvdAuditCpe.errors?.find((e) => e.reason === 'rate_limited');
+    expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
 });

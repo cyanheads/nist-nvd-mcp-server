@@ -34,7 +34,11 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
     ctx.log.debug('Fetching CVE resource', { cveId });
     const service = getNvdCveService();
 
-    const result = await service.fetchById([cveId.toUpperCase()], true, ctx);
+    const result = await service.fetchById(
+      [cveId.toUpperCase()],
+      { includeReferences: true, allLanguages: false },
+      ctx,
+    );
 
     if (result.cves.length === 0) {
       throw notFound(`CVE ${cveId} not found in the NVD database.`, { cveId });

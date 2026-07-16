@@ -33,6 +33,16 @@ const BriefCveRecordSchema = z.object({
     })
     .optional()
     .describe('Top severity. Absent if no CVSS scores are present.'),
+  filteredSeverity: z
+    .object({
+      label: z.string().describe('Severity label at the CVSS version the severity filter used.'),
+      score: z.number().describe('Base score at that CVSS version (0.0–10.0).'),
+      fromVersion: z.string().describe('The CVSS version the severity filter matched on.'),
+    })
+    .optional()
+    .describe(
+      'Severity at the CVSS version the severity filter matched this CVE on. Present only when a severity filter was supplied and that version disagrees with the cross-version top severity above — e.g. a CVE scored v2 10.0 (HIGH) and v3.1 9.8 (CRITICAL) headlines as HIGH but matched a CRITICAL v3 query on the 9.8.',
+    ),
   cisaVulnerabilityName: z
     .string()
     .optional()
@@ -44,7 +54,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   description:
     'Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. ' +
     'The primary discovery tool for vulnerability surveillance and triage workflows. ' +
-    'pubDays and lastModDays are convenience shorthands that expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in queryMeta. ' +
+    'pubDays and lastModDays are convenience shorthands that expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in the response enrichment. ' +
     'Returns brief summaries — call nvd_get_cve for full detail on specific IDs. ' +
     'At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID).',
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -154,6 +164,30 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         'Entries for any pubDays/lastModDays values that exceeded 120 and were auto-clamped. ' +
           'Absent when no clamping occurred.',
       ),
+    filtersApplied: z
+      .object({
+        keyword: z.string().optional().describe('The keyword filter that was applied.'),
+        severity: z.string().optional().describe('The severity floor that was applied.'),
+        severityVersion: z
+          .string()
+          .optional()
+          .describe(
+            'The CVSS version the severity filter matched on. Present only alongside severity.',
+          ),
+        cweId: z.string().optional().describe('The CWE weakness filter that was applied.'),
+        kevOnly: z
+          .boolean()
+          .optional()
+          .describe('Present as true when results were limited to the CISA KEV catalog.'),
+        noRejected: z
+          .boolean()
+          .optional()
+          .describe('Present as false when rejected CVEs were left in the results.'),
+      })
+      .optional()
+      .describe(
+        'The non-default filters this query actually applied — the ones that can account for an empty or unexpectedly narrow result set. Absent when the query ran unfiltered, which is itself the answer when a result set is unexpectedly broad.',
+      ),
     notice: z
       .string()
       .optional()
@@ -171,6 +205,14 @@ export const nvdSearchCves = tool('nvd_search_cves', {
               `> **Note:** ${c.param} value ${c.original} exceeded the 120-day maximum and was clamped to ${c.clamped}.`,
           )
           .join('\n') ?? '',
+    },
+    filtersApplied: {
+      render: (filters) =>
+        filters
+          ? `**Filters applied:** ${Object.entries(filters)
+              .map(([key, value]) => `${key}=${value}`)
+              .join(', ')}`
+          : '',
     },
   },
 
@@ -215,7 +257,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     },
     {
       reason: 'rate_limited',
-      code: JsonRpcErrorCode.ServiceUnavailable,
+      code: JsonRpcErrorCode.RateLimited,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
       retryable: true,
       recovery:
@@ -412,10 +454,23 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       ctx,
     );
 
+    /**
+     * Echo only what the caller actually narrowed by: severityVersion and noRejected carry
+     * defaults, so reporting them unconditionally would name filters the caller never chose.
+     */
+    const filtersApplied = {
+      ...(input.keyword && { keyword: input.keyword }),
+      ...(input.severity && { severity: input.severity, severityVersion: input.severityVersion }),
+      ...(input.cweId && { cweId: input.cweId }),
+      ...(input.kevOnly && { kevOnly: true }),
+      ...(input.noRejected === false && { noRejected: false }),
+    };
+
     ctx.enrich({
       returned: result.returned,
       offset: result.offset,
       ...(datesClamped.length > 0 && { datesClamped }),
+      ...(Object.keys(filtersApplied).length > 0 && { filtersApplied }),
     });
     ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
@@ -450,6 +505,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         );
       } else {
         lines.push('**Severity:** Not available');
+      }
+
+      if (cve.filteredSeverity) {
+        lines.push(
+          `**Severity at the filtered CVSS version:** ${cve.filteredSeverity.label} (${cve.filteredSeverity.score}) from CVSS ${cve.filteredSeverity.fromVersion} — this is the score the severity filter matched on.`,
+        );
       }
 
       if (cve.cisaVulnerabilityName) {

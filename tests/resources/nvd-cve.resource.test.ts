@@ -64,7 +64,11 @@ describe('nvdCveResource', () => {
     const params = nvdCveResource.params.parse({ cveId: 'cve-2021-44228' });
     await nvdCveResource.handler(params, ctx);
 
-    expect(mockService.fetchById).toHaveBeenCalledWith(['CVE-2021-44228'], true, ctx);
+    expect(mockService.fetchById).toHaveBeenCalledWith(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: false },
+      ctx,
+    );
   });
 
   it('throws validationError for an invalid CVE ID format', async () => {

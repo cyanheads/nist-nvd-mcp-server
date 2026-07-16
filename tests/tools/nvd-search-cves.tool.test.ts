@@ -3,6 +3,7 @@
  * @module tests/tools/nvd-search-cves.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
@@ -20,6 +21,15 @@ const BRIEF_CVE_NO_SEVERITY: BriefCveRecord = {
   cveId: 'CVE-2022-00001',
   vulnStatus: 'Awaiting Analysis',
   published: '2022-01-01T00:00:00.000',
+};
+
+/** Shellshock shape: v2 headline (HIGH 10.0) diverges from the v3 filter version (CRITICAL 9.8). */
+const BRIEF_CVE_DIVERGENT: BriefCveRecord = {
+  cveId: 'CVE-2014-6271',
+  vulnStatus: 'Analyzed',
+  published: '2014-09-24T00:00:00.000',
+  severity: { label: 'HIGH', score: 10.0, fromVersion: '2.0' },
+  filteredSeverity: { label: 'CRITICAL', score: 9.8, fromVersion: '3.1' },
 };
 
 function makeSearchResult(cves: BriefCveRecord[] = [BRIEF_CVE], total = 1) {
@@ -342,5 +352,68 @@ describe('nvdSearchCves', () => {
   // Issue #12: description accuracy (regression guard — the description text is read in catalog tests)
   it('description does not claim no-filter returns most recently modified CVEs', () => {
     expect(nvdSearchCves.description).not.toContain('most recently modified');
+  });
+
+  // Issue #24: the per-row filtered-version severity passes through and renders.
+  it('passes filteredSeverity through from the service to output', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult([BRIEF_CVE_DIVERGENT]));
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ severity: 'CRITICAL', severityVersion: 'v3' });
+    const result = await nvdSearchCves.handler(input, ctx);
+
+    expect(result.cves[0].filteredSeverity).toEqual({
+      label: 'CRITICAL',
+      score: 9.8,
+      fromVersion: '3.1',
+    });
+  });
+
+  it('renders both the headline and the filtered-version severity in format()', () => {
+    const output = { cves: [BRIEF_CVE_DIVERGENT] };
+    const blocks = nvdSearchCves.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('CVE-2014-6271');
+    // Cross-version headline (HIGH) and the reconciled filter-version score (CRITICAL 9.8).
+    expect(text).toContain('HIGH');
+    expect(text).toContain('CRITICAL');
+    expect(text).toContain('9.8');
+  });
+
+  // Issue #19: the query echoes the non-default filters it actually applied.
+  it('echoes non-default filters in the filtersApplied enrichment', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({
+      keyword: 'log4j',
+      severity: 'CRITICAL',
+      kevOnly: true,
+    });
+    await nvdSearchCves.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.filtersApplied).toMatchObject({
+      keyword: 'log4j',
+      severity: 'CRITICAL',
+      severityVersion: 'v3',
+      kevOnly: true,
+    });
+    // Defaulted filters the caller never chose must not be echoed.
+    expect(enrichment.filtersApplied).not.toHaveProperty('noRejected');
+  });
+
+  it('omits filtersApplied when the query ran unfiltered', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({});
+    await nvdSearchCves.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.filtersApplied).toBeUndefined();
+  });
+
+  // Issue #25: the advertised rate_limited code must match the client's thrown RateLimited.
+  it('declares rate_limited with the RateLimited error code', () => {
+    const entry = nvdSearchCves.errors?.find((e) => e.reason === 'rate_limited');
+    expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
 });

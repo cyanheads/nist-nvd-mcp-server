@@ -6,11 +6,11 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `nvd_get_cve` | Fetch one or more CVEs by ID. Returns full details: CVSS scores (all available versions), CWE weaknesses, affected CPE configurations, CISA KEV fields, and references. Up to 100 IDs per call; use `brief` mode for bulk lookups to control output size. | `cveIds` (up to 100), `brief`, `includeReferences` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (ServiceUnavailable) |
-| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (InvalidParams), `date_range_exceeds_max` (InvalidParams), `rate_limited` (ServiceUnavailable) |
-| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (ServiceUnavailable) |
-| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (ServiceUnavailable) |
-| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (ServiceUnavailable) |
+| `nvd_get_cve` | Fetch one or more CVEs by ID. Returns full details: CVSS scores (all available versions), CWE weaknesses, affected CPE configurations, CISA KEV fields, and references. Up to 100 IDs per call; use `brief` mode for bulk lookups to control output size. | `cveIds` (up to 100), `brief`, `includeReferences`, `allLanguages` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
+| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (InvalidParams), `date_range_exceeds_max` (InvalidParams), `rate_limited` (RateLimited) |
+| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (RateLimited) |
+| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (RateLimited) |
+| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
 
 ### Resources
 
@@ -224,6 +224,7 @@ Present only when the CVE appears in the CISA KEV catalog:
 - `cveIds: string | string[]` — one CVE ID or an array of up to 100 (e.g., `"CVE-2021-44228"` or `["CVE-2021-44228", "CVE-2022-0001"]`)
 - `brief?: boolean` — default `false`. When `true`, returns trimmed records (ID, status, top CVSS score, KEV name, published date) instead of full detail. Recommended for batches of more than 10.
 - `includeReferences?: boolean` — default `true`. Set to `false` to omit the references array and reduce response size.
+- `allLanguages?: boolean` — default `false`. When `false`, full records keep only the English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description. No effect in brief mode.
 
 **Output:**
 - `cves: CveRecord[]` — array of CVE records. Each record includes: `cveId`, `vulnStatus`, `published`, `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `cisaKev` (if in KEV catalog).
@@ -239,7 +240,7 @@ errors: [
   { reason: 'cve_not_found', code: 'NotFound',
     when: 'Valid-format ID returns HTTP 200 with empty vulnerabilities array — ID is well-formed but does not exist in NVD. Distinct from format error.',
     retryable: false },
-  { reason: 'rate_limited', code: 'ServiceUnavailable',
+  { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After header. The parsed Retry-After holds the queue until NVD window reset; a keyed call spends one patient retry on it, a keyless call fails fast and names NVD_API_KEY.',
     retryable: true },
 ]
@@ -280,7 +281,7 @@ errors: [
   { reason: 'date_range_exceeds_max', code: 'InvalidParams',
     when: 'Raw pubStartDate/pubEndDate or lastModStartDate/lastModEndDate span more than 120 days. (pubDays/lastModDays over 120 are auto-clamped, not an error.)',
     retryable: false },
-  { reason: 'rate_limited', code: 'ServiceUnavailable',
+  { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',
     retryable: true },
 ]
@@ -300,6 +301,7 @@ errors: [
 - `versionStart?: string`, `versionStartType?: 'including' | 'excluding'` — lower version bound; requires `virtualMatchString`
 - `versionEnd?: string`, `versionEndType?: 'including' | 'excluding'` — upper version bound; requires `virtualMatchString`
 - `severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — filter out CVEs below this severity
+- `allLanguages?: boolean` — default `false`. When `false`, each record keeps only its English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description.
 - `limit?: number` — max results (default 20, max 2000)
 
 Exactly one of `cpeName` or `virtualMatchString` is required.
@@ -327,7 +329,7 @@ errors: [
   { reason: 'cpe_not_found', code: 'NotFound',
     when: 'cpeName is a valid format but NVD returns no matching CVEs — the CPE may be misspelled or not in NVD. Use nvd_search_cpes to verify.',
     retryable: false },
-  { reason: 'rate_limited', code: 'ServiceUnavailable',
+  { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After. Keyed: one patient retry across the window. Keyless: fails fast naming NVD_API_KEY.',
     retryable: true },
 ]
@@ -358,7 +360,7 @@ errors: [
   { reason: 'missing_search_input', code: 'InvalidParams',
     when: 'Neither keyword nor cpeMatchString provided.',
     retryable: false },
-  { reason: 'rate_limited', code: 'ServiceUnavailable',
+  { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',
     retryable: true },
 ]
@@ -391,7 +393,7 @@ errors: [
   { reason: 'cve_not_found', code: 'NotFound',
     when: 'Valid-format CVE ID returns empty cveChanges array — CVE exists in NVD but has no recorded history events, or the ID does not exist.',
     retryable: false },
-  { reason: 'rate_limited', code: 'ServiceUnavailable',
+  { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',
     retryable: true },
 ]

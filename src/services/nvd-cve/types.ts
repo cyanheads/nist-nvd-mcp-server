@@ -159,6 +159,11 @@ export interface CveRecord {
 export interface BriefCveRecord {
   cisaVulnerabilityName?: string;
   cveId: string;
+  /**
+   * Severity at the CVSS version a `severity` filter selected on, when that disagrees with the
+   * cross-version `severity` headline. Absent when no filter was applied or the two agree.
+   */
+  filteredSeverity?: TopSeverity;
   published: string;
   severity?: TopSeverity;
   vulnStatus: string;

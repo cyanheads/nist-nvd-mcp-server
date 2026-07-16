@@ -3,6 +3,7 @@
  * @module tests/tools/nvd-get-cve.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdGetCve } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
@@ -226,5 +227,63 @@ describe('nvdGetCve', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Not available');
     expect(text).not.toMatch(/Severity:.*undefined/);
+  });
+
+  // Issue #23: English-only is the default; other languages gate behind allLanguages.
+  it('threads allLanguages through to fetchById when set', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [FULL_CVE],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', allLanguages: true });
+    await nvdGetCve.handler(input, ctx);
+
+    expect(mockService.fetchById).toHaveBeenCalledWith(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: true },
+      ctx,
+    );
+  });
+
+  it('defaults allLanguages to false (English-only) when omitted', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [FULL_CVE],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
+    await nvdGetCve.handler(input, ctx);
+
+    expect(mockService.fetchById).toHaveBeenCalledWith(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: false },
+      ctx,
+    );
+  });
+
+  // Issue #23: a fallback record with no English entry must still render prose, not blank.
+  it('renders a non-English description when a full record has no English entry', () => {
+    const spanishOnly = {
+      ...FULL_CVE,
+      descriptions: [{ lang: 'es', value: 'Vulnerabilidad JNDI en Apache Log4j2.' }],
+    };
+    const output = {
+      brief: false,
+      cves: [spanishOnly as unknown as Record<string, unknown>],
+    };
+    const blocks = nvdGetCve.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('Vulnerabilidad JNDI en Apache Log4j2.');
+  });
+
+  // Issue #25: the advertised rate_limited code must match the client's thrown RateLimited.
+  it('declares rate_limited with the RateLimited error code', () => {
+    const entry = nvdGetCve.errors?.find((e) => e.reason === 'rate_limited');
+    expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
 });

@@ -104,7 +104,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     },
     {
       reason: 'rate_limited',
-      code: JsonRpcErrorCode.ServiceUnavailable,
+      code: JsonRpcErrorCode.RateLimited,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
       retryable: true,
       recovery:

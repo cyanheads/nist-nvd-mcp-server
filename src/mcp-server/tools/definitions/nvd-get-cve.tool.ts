@@ -40,6 +40,14 @@ export const nvdGetCve = tool('nvd_get_cve', {
       .boolean()
       .default(true)
       .describe('When false, omits the references array to reduce response size.'),
+    allLanguages: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When true, keeps every localized description NVD supplies on each record. ' +
+          'Default keeps English only, falling back to whatever exists if a record has no English entry. ' +
+          'Applies to full records; brief records carry no descriptions.',
+      ),
   }),
 
   // Use passthrough to avoid aspirational over-typing of the upstream CVE schema.
@@ -94,7 +102,7 @@ export const nvdGetCve = tool('nvd_get_cve', {
     },
     {
       reason: 'rate_limited',
-      code: JsonRpcErrorCode.ServiceUnavailable,
+      code: JsonRpcErrorCode.RateLimited,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
       retryable: true,
       recovery:
@@ -107,7 +115,11 @@ export const nvdGetCve = tool('nvd_get_cve', {
     ctx.log.info('Fetching CVEs', { count: ids.length, brief: input.brief });
 
     const service = getNvdCveService();
-    const result = await service.fetchById(ids, input.includeReferences, ctx);
+    const result = await service.fetchById(
+      ids,
+      { includeReferences: input.includeReferences, allLanguages: input.allLanguages },
+      ctx,
+    );
 
     ctx.enrich({
       requested: result.requested,
@@ -178,8 +190,10 @@ export const nvdGetCve = tool('nvd_get_cve', {
         }
 
         if (cve.descriptions && cve.descriptions.length > 0) {
-          const en = cve.descriptions.find((d) => d.lang === 'en');
-          if (en) lines.push(`\n${en.value}`);
+          // English-only is the default, but a record with no English entry falls back to the
+          // first available language — render that rather than leaving text-only clients blank.
+          const desc = cve.descriptions.find((d) => d.lang === 'en') ?? cve.descriptions[0];
+          if (desc) lines.push(`\n${desc.value}`);
         }
 
         if (cve.weaknesses && cve.weaknesses.length > 0) {

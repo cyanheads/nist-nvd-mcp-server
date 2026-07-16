@@ -195,7 +195,15 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     severityMin: z
       .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
       .optional()
-      .describe('Filter out CVEs below this severity level.'),
+      .describe(
+        'Filter out CVEs below this severity level. Applied after NVD returns the page, so it can only drop CVEs within limit — raise limit to widen what it sees.',
+      ),
+    allLanguages: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When true, keeps every localized description NVD supplies on each record. Default keeps English only.',
+      ),
     limit: z
       .number()
       .int()
@@ -217,15 +225,29 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     totalCount: z.number().describe('Total CVEs matched before pagination.'),
     returned: z.number().describe('Number of CVE records returned.'),
     auditTarget: z.string().describe('The CPE name or virtual match string used for this audit.'),
+    severityMin: z
+      .string()
+      .optional()
+      .describe('The client-side minimum severity filter applied. Absent when none was set.'),
+    filteredCount: z
+      .number()
+      .optional()
+      .describe(
+        'CVEs dropped by the severityMin filter from the page NVD returned. Present whenever severityMin is set; 0 means the filter dropped nothing, so a narrow result reflects totalCount and limit instead. This is not totalCount minus returned — CVEs beyond limit were never fetched and so were never evaluated against the filter.',
+      ),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no CVEs were found — suggests verifying the CPE name.'),
+      .describe(
+        'Guidance when no CVEs were returned — distinguishes an unknown CPE from a severityMin filter that dropped everything on the page.',
+      ),
   },
 
   enrichmentTrailer: {
     returned: { label: 'Returned' },
     auditTarget: { label: 'Audit Target' },
+    severityMin: { label: 'Severity Filter' },
+    filteredCount: { label: 'Dropped by Severity Filter' },
   },
 
   errors: [
@@ -265,7 +287,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     },
     {
       reason: 'rate_limited',
-      code: JsonRpcErrorCode.ServiceUnavailable,
+      code: JsonRpcErrorCode.RateLimited,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
       retryable: true,
       recovery:
@@ -328,6 +350,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         ...(input.versionEnd && { versionEnd: input.versionEnd }),
         versionEndType: input.versionEndType,
         ...(input.severityMin && { severityMin: input.severityMin }),
+        allLanguages: input.allLanguages,
         limit: input.limit,
       },
       ctx,
@@ -337,12 +360,25 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     ctx.enrich({
       returned: result.returned,
       auditTarget,
+      ...(input.severityMin && {
+        severityMin: input.severityMin,
+        filteredCount: result.filteredCount,
+      }),
     });
     ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
-      ctx.enrich.notice(
-        'No CVEs found for this product. Verify the CPE name with nvd_search_cpes.',
-      );
+      // Distinguish "the CPE has no CVEs" from "severityMin dropped everything on the page":
+      // filteredCount > 0 means NVD did return CVEs, they were just below the threshold.
+      if (input.severityMin && result.filteredCount > 0) {
+        ctx.enrich.notice(
+          `All ${result.filteredCount} CVE(s) on the fetched page scored below ${input.severityMin}. ` +
+            'Lower severityMin or raise limit to widen the page NVD returns.',
+        );
+      } else {
+        ctx.enrich.notice(
+          'No CVEs found for this product. Verify the CPE name with nvd_search_cpes.',
+        );
+      }
     }
 
     return { cves: result.cves };
