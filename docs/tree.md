@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-07-27 09:43:30
+Generated on: 2026-07-27 10:28:03
 
 ```text
 nist-nvd-mcp-server/
@@ -144,8 +144,10 @@ nist-nvd-mcp-server/
 │   │       │   ├── nvd-get-cve.tool.ts
 │   │       │   ├── nvd-search-cpes.tool.ts
 │   │       │   └── nvd-search-cves.tool.ts
-│   │       └── formatting/
-│   │           └── cpe-match.ts
+│   │       ├── formatting/
+│   │       │   └── cpe-match.ts
+│   │       └── schemas/
+│   │           └── brief-cve.ts
 │   ├── services/
 │   │   ├── nvd-cpe/
 │   │   │   ├── nvd-cpe-service.ts

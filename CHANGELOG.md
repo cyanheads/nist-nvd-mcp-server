@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-27
+
+nvd_search_cves, nvd_search_cpes, and nvd_audit_cpe distinguish an offset past the result set from an empty page NVD returned inside a range it says has matches; nvd_search_cves and nvd_audit_cpe gain a next-page notice; nvd_get_cve's brief mode now shares its row builder with nvd_search_cves instead of duplicating it inline.
+
 ## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-27
 
 nvd_audit_cpe and nvd_search_cpes gain offset paging; nvd_get_cve's format() renders CPE match criteria and every language a record carries instead of a bare count and English-only text; search results carry a truncated description; docs/design.md and README describe the enrichment block instead of the removed queryMeta envelope.
