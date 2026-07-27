@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-27
+
+nvd_audit_cpe and nvd_search_cpes gain offset paging; nvd_get_cve's format() renders CPE match criteria and every language a record carries instead of a bare count and English-only text; search results carry a truncated description; docs/design.md and README describe the enrichment block instead of the removed queryMeta envelope.
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-27
 
 nvd_get_cve_history gains an order input (newest/oldest) and no longer loses pages carrying Affected/SSVC change values; invalid_cve_id_format and cve_not_found now carry their declared recovery hints; nvd_search_cves' severity filter is documented as exact-band, not a floor.
