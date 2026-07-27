@@ -221,7 +221,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       .string()
       .optional()
       .describe(
-        'Guidance when no CVEs were returned — distinguishes an unknown CPE from a severityMin filter that dropped everything on the page.',
+        'Guidance on the shape of this page. When no CVEs came back it distinguishes an unknown CPE from a severityMin filter that dropped everything on the page, from an offset past the result set, from an empty page NVD returned inside a range it says has matches. On a partial page it names the offset that reaches the next one.',
       ),
   },
 
@@ -353,10 +353,14 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     });
     ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
-      // Distinguish "the CPE has no CVEs" from "severityMin dropped everything on the page" from
-      // "the offset ran off the end": filteredCount > 0 means NVD did return CVEs, they were just
-      // below the threshold; an offset at or past totalCount means the product has CVEs but this
-      // page is empty, so telling the caller to re-check the CPE would send them the wrong way.
+      /**
+       * Four ways a page comes back empty, narrowest first. An offset at or past totalCount means
+       * the product has CVEs and this page merely sits past them. filteredCount > 0 means NVD did
+       * return CVEs and severityMin cut them. A valid offset inside a non-zero totalCount means
+       * NVD contradicted its own count, so neither the offset nor the target is at fault. Only a
+       * zero count warrants re-checking the target — every earlier branch exists to keep the
+       * caller from being sent after a mistake they did not make.
+       */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
         ctx.enrich.notice(
           `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
@@ -366,11 +370,26 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
           `All ${result.filteredCount} CVE(s) on the fetched page scored below ${input.severityMin}. ` +
             'Lower severityMin or raise limit to widen the page NVD returns.',
         );
+      } else if (result.totalResults > 0) {
+        ctx.enrich.notice(
+          `NVD reported ${result.totalResults} CVE(s) for this audit target but returned none at offset ${input.offset}, which is inside that range. Retry the query; neither the offset nor the audit target is the problem.`,
+        );
       } else {
         ctx.enrich.notice(
-          'No CVEs found for this product. Verify the CPE name with nvd_search_cpes.',
+          'NVD returned no CVEs for this audit target. Verify it exists in the CPE dictionary with nvd_search_cpes.',
         );
       }
+    } else if (result.totalResults > result.offset + result.returned + result.filteredCount) {
+      /**
+       * Advance by what NVD's page consumed, not by what survived it: `returned` counts the rows
+       * left after the client-side severityMin filter, so paging on `offset + returned` alone
+       * would re-serve every row that filter dropped. `returned + filteredCount` is the span NVD
+       * actually spent index positions on, and collapses to `returned` when no filter is set.
+       */
+      const consumed = result.returned + result.filteredCount;
+      ctx.enrich.notice(
+        `Results truncated — ${result.totalResults} CVEs match this audit target; set offset to ${result.offset + consumed} for the next page.`,
+      );
     }
 
     return { cves: result.cves };

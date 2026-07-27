@@ -539,3 +539,280 @@ describe('nvdAuditCpe', () => {
     expect(notice).not.toContain('past the end');
   });
 });
+
+/**
+ * Issue #34: the fall-through told a caller to re-check the CPE whenever a page came back empty
+ * for any reason the earlier branches did not name — including a valid offset inside a result set
+ * NVD said had matches, where the CPE was never the problem.
+ */
+describe('nvdAuditCpe — empty-page notices (issue #34)', () => {
+  const mockService = { auditCpe: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.auditCpe.mockReset();
+  });
+
+  /**
+   * Notice raised for an empty page. `virtualMatchString` is the audit target throughout: with a
+   * `cpeName`, the service throws `cpe_not_found` before a zero-total page can reach the handler.
+   */
+  async function noticeFor(
+    offset: number,
+    totalResults: number,
+    extra: { severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; filteredCount?: number } = {},
+  ): Promise<string | undefined> {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults,
+      returned: 0,
+      offset,
+      filteredCount: extra.filteredCount ?? 0,
+      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+      offset,
+      ...(extra.severityMin && { severityMin: extra.severityMin }),
+    });
+    await nvdAuditCpe.handler(input, ctx);
+    return getEnrichment(ctx).notice;
+  }
+
+  it('blames the offset only once it has reached totalCount', async () => {
+    const notice = await noticeFor(351, 351);
+
+    expect(notice).toContain('past the end');
+    expect(notice).toContain('351');
+    expect(notice).not.toContain('nvd_search_cpes');
+    expect(notice).not.toContain('Retry the query');
+  });
+
+  it('does not blame the audit target for an empty page inside the result range', async () => {
+    const notice = await noticeFor(40, 351);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('nvd_search_cpes');
+    expect(notice).toContain('351');
+    expect(notice).toContain('40');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('treats an offset one below totalCount as inside the range', async () => {
+    const notice = await noticeFor(350, 351);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('reports a genuinely unmatched audit target rather than any paging notice', async () => {
+    const notice = await noticeFor(0, 0);
+
+    expect(notice).toContain('nvd_search_cpes');
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('Retry the query');
+  });
+
+  it('keeps the severity-drop notice ahead of the contradicted-count notice', async () => {
+    // Both conditions hold: totalCount is non-zero at a valid offset AND severityMin cut the page.
+    // The filter is the specific, actionable cause, so it must win.
+    const notice = await noticeFor(0, 351, { severityMin: 'CRITICAL', filteredCount: 3 });
+
+    expect(notice).toContain('CRITICAL');
+    expect(notice).not.toContain('Retry the query');
+    expect(notice).not.toContain('past the end');
+  });
+
+  it('falls to the contradicted-count notice when severityMin dropped nothing', async () => {
+    const notice = await noticeFor(0, 351, { severityMin: 'CRITICAL', filteredCount: 0 });
+
+    expect(notice).toContain('Retry the query');
+    expect(notice).not.toContain('scored below');
+    expect(notice).not.toContain('nvd_search_cpes');
+  });
+});
+
+/**
+ * Issue #36: nvd_audit_cpe was the only paginating tool with no partial-page signal, so a caller
+ * had to infer from totalCount that more CVEs existed. Unlike the sibling search tools, `returned`
+ * here is the count AFTER the client-side severityMin filter, so the next offset has to advance by
+ * what NVD's page consumed (`returned + filteredCount`), not by what survived it.
+ */
+describe('nvdAuditCpe — next-page notice (issue #36)', () => {
+  const mockService = { auditCpe: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.auditCpe.mockReset();
+  });
+
+  /** Notice for a page of `returned` surviving rows at `offset`, with `filteredCount` dropped. */
+  async function noticeFor(
+    offset: number,
+    returned: number,
+    totalResults: number,
+    filteredCount = 0,
+  ): Promise<string | undefined> {
+    mockService.auditCpe.mockResolvedValue({
+      cves: Array.from({ length: returned }, (_, i) => ({
+        ...FULL_CVE,
+        cveId: `CVE-2024-${String(offset + i).padStart(5, '0')}`,
+      })),
+      totalResults,
+      returned,
+      offset,
+      filteredCount,
+      cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+    });
+    const ctx = createMockContext();
+    await nvdAuditCpe.handler(
+      nvdAuditCpe.input.parse({
+        cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+        offset,
+        limit: Math.max(returned + filteredCount, 1),
+      }),
+      ctx,
+    );
+    return getEnrichment(ctx).notice;
+  }
+
+  it('names the next page offset on a partial first page', async () => {
+    const notice = await noticeFor(0, 3, 10);
+
+    expect(notice).toContain('truncated');
+    expect(notice).toContain('10');
+    // 3 rows at offset 0 covers indices 0–2, so the next page starts at 3 — not 4.
+    expect(notice).toContain('set offset to 3');
+    expect(notice).not.toContain('set offset to 4');
+  });
+
+  it('advances the named offset by the page size, leaving no gap', async () => {
+    const notice = await noticeFor(3, 3, 10);
+
+    expect(notice).toContain('set offset to 6');
+  });
+
+  it('omits the notice when the page reaches the end of the result set exactly', async () => {
+    expect(await noticeFor(6, 4, 10)).toBeUndefined();
+    expect(await noticeFor(0, 10, 10)).toBeUndefined();
+  });
+
+  it('omits the notice when a single page carries every match', async () => {
+    expect(await noticeFor(0, 1, 1)).toBeUndefined();
+  });
+
+  /**
+   * The severityMin filter is what makes this tool's arithmetic differ from the search tools:
+   * NVD served 3 rows and spent 3 index positions, but only 1 survived the threshold.
+   */
+  it('advances past rows severityMin dropped rather than re-serving them', async () => {
+    const notice = await noticeFor(0, 1, 10, 2);
+
+    // Paging on `returned` alone would say 1 and re-serve the two filtered rows at indices 1–2.
+    expect(notice).toContain('set offset to 3');
+    expect(notice).not.toContain('set offset to 1');
+  });
+
+  it('counts filtered rows toward reaching the end of the result set', async () => {
+    // 6 consumed + offset 4 === totalCount 10: nothing remains, even though only 2 rows survived.
+    expect(await noticeFor(4, 2, 10, 4)).toBeUndefined();
+  });
+
+  it('fires exactly one notice — never a next-page notice on an empty page', async () => {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 10,
+      returned: 0,
+      offset: 99,
+      filteredCount: 0,
+      cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+    });
+    const ctx = createMockContext();
+    await nvdAuditCpe.handler(
+      nvdAuditCpe.input.parse({
+        cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+        offset: 99,
+      }),
+      ctx,
+    );
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('past the end');
+    expect(notice).not.toContain('truncated');
+  });
+});
+
+/**
+ * The partial-page arm sits on the outer `else` of the empty-page check, so it is structurally
+ * exclusive with the four empty-page branches. Assert that rather than trust it: every case must
+ * raise a notice, and exactly one of the five shapes.
+ */
+describe('nvdAuditCpe — exactly one notice per response', () => {
+  const mockService = { auditCpe: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.auditCpe.mockReset();
+  });
+
+  const SHAPES = {
+    pastEnd: 'past the end',
+    severityDrop: 'scored below',
+    contradictedCount: 'Retry the query',
+    genuineZero: 'Verify it exists in the CPE dictionary',
+    partialPage: 'Results truncated',
+  } as const;
+
+  const CASES: Array<{
+    name: keyof typeof SHAPES;
+    result: Record<string, unknown>;
+    severityMin?: 'CRITICAL';
+  }> = [
+    { name: 'pastEnd', result: { returned: 0, offset: 500, totalResults: 10, filteredCount: 0 } },
+    {
+      name: 'severityDrop',
+      result: { returned: 0, offset: 0, totalResults: 10, filteredCount: 3 },
+      severityMin: 'CRITICAL',
+    },
+    {
+      name: 'contradictedCount',
+      result: { returned: 0, offset: 2, totalResults: 10, filteredCount: 0 },
+    },
+    { name: 'genuineZero', result: { returned: 0, offset: 0, totalResults: 0, filteredCount: 0 } },
+    { name: 'partialPage', result: { returned: 3, offset: 0, totalResults: 10, filteredCount: 0 } },
+  ];
+
+  it.each(CASES)('raises only the $name notice', async ({ name, result, severityMin }) => {
+    const returned = result.returned as number;
+    mockService.auditCpe.mockResolvedValue({
+      ...result,
+      cves: Array.from({ length: returned }, () => FULL_CVE),
+      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+    });
+    const ctx = createMockContext();
+    await nvdAuditCpe.handler(
+      nvdAuditCpe.input.parse({
+        virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+        offset: result.offset as number,
+        ...(severityMin && { severityMin }),
+      }),
+      ctx,
+    );
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toBeDefined();
+    expect(notice).toContain(SHAPES[name]);
+
+    // Every other shape must be absent — the branches cannot both fire.
+    for (const [shapeName, marker] of Object.entries(SHAPES)) {
+      if (shapeName !== name) expect(notice).not.toContain(marker);
+    }
+  });
+});

@@ -272,3 +272,73 @@ describe('nvdSearchCpes', () => {
     expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
 });
+
+/**
+ * Issue #34: an empty page was only checked against `totalResults > 0` before the offset guard
+ * landed, and the fall-through still told a caller nothing matched when NVD said otherwise. All
+ * three paginating tools now separate the overrun, the contradicted count, and the true no-match.
+ */
+describe('nvdSearchCpes — empty-page notices (issue #34)', () => {
+  const mockService = { searchCpes: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCpeServiceModule.getNvdCpeService>,
+    );
+    mockService.searchCpes.mockReset();
+  });
+
+  /** Notice raised for an empty page at `offset` when NVD reports `totalResults` matches. */
+  async function noticeFor(offset: number, totalResults: number): Promise<string | undefined> {
+    mockService.searchCpes.mockResolvedValue({ cpes: [], totalResults, returned: 0, offset });
+    const ctx = createMockContext();
+    await nvdSearchCpes.handler(nvdSearchCpes.input.parse({ keyword: 'apache', offset }), ctx);
+    return getEnrichment(ctx).notice;
+  }
+
+  it('blames the offset only once it has reached totalCount', async () => {
+    const notice = await noticeFor(21_178, 21_178);
+
+    expect(notice).toContain('past the end');
+    expect(notice).toContain('21178');
+    expect(notice).not.toContain('Retry the query');
+    expect(notice).not.toContain('No CPEs matched');
+  });
+
+  it('does not blame the offset for an empty page inside the result range', async () => {
+    const notice = await noticeFor(60, 21_178);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('No CPEs matched');
+    expect(notice).toContain('21178');
+    expect(notice).toContain('60');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('treats an offset one below totalCount as inside the range', async () => {
+    const notice = await noticeFor(21_177, 21_178);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('reports a genuinely unmatched keyword rather than either paging notice', async () => {
+    const notice = await noticeFor(0, 0);
+
+    expect(notice).toContain('No CPEs matched');
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('Retry the query');
+  });
+
+  it('never fires the truncation notice alongside an empty-page notice', async () => {
+    // A page can be empty or partial, never both — the truncation branch is the outer `else`.
+    for (const [offset, total] of [
+      [21_178, 21_178],
+      [60, 21_178],
+      [0, 0],
+    ] as const) {
+      const notice = await noticeFor(offset, total);
+      expect(notice).not.toContain('truncated');
+    }
+  });
+});

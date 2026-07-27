@@ -88,7 +88,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       .string()
       .optional()
       .describe(
-        'Guidance when no CPEs matched, the offset ran past the result set, or entries remain beyond this page.',
+        'Guidance when no CPEs matched, the offset ran past the result set, NVD returned an empty page inside a range it says has matches, or entries remain beyond this page.',
       ),
   },
 
@@ -160,9 +160,18 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     ctx.enrich({ returned: result.returned, offset: result.offset });
     ctx.enrich.total(result.totalResults);
     if (result.cpes.length === 0) {
+      /**
+       * An empty page only proves the offset overran once the offset reaches totalCount. Inside
+       * that range NVD contradicted its own count, and neither "lower the offset" nor "nothing
+       * matched" is true — say so rather than sending the caller after a mistake they did not make.
+       */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
         ctx.enrich.notice(
           `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else if (result.totalResults > 0) {
+        ctx.enrich.notice(
+          `NVD reported ${result.totalResults} match(es) but returned no entries at offset ${input.offset}, which is inside that range. Retry the query; the offset is not the problem.`,
         );
       } else {
         ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');

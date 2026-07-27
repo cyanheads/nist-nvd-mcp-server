@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { BriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
 const MAX_DATE_RANGE_DAYS = 120;
@@ -20,42 +21,6 @@ function daysAgo(days: number): string {
 function nowIso(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z');
 }
-
-const BriefCveRecordSchema = z.object({
-  cveId: z.string().describe('CVE identifier (e.g., "CVE-2021-44228").'),
-  vulnStatus: z.string().describe('NVD analysis status.'),
-  published: z.string().describe('ISO 8601 publication datetime.'),
-  description: z
-    .string()
-    .optional()
-    .describe(
-      'Opening 200 characters of the English CVE description, truncated with an ellipsis when longer. ' +
-        'Enough to tell one result from another; call nvd_get_cve for the full text. ' +
-        'Absent when NVD carries no description for the record.',
-    ),
-  severity: z
-    .object({
-      label: z.string().describe('Highest severity label across all CVSS versions.'),
-      score: z.number().describe('Highest base score (0.0–10.0).'),
-      fromVersion: z.string().describe('CVSS version this score came from.'),
-    })
-    .optional()
-    .describe('Top severity. Absent if no CVSS scores are present.'),
-  filteredSeverity: z
-    .object({
-      label: z.string().describe('Severity label at the CVSS version the severity filter used.'),
-      score: z.number().describe('Base score at that CVSS version (0.0–10.0).'),
-      fromVersion: z.string().describe('The CVSS version the severity filter matched on.'),
-    })
-    .optional()
-    .describe(
-      'Severity at the CVSS version the severity filter matched this CVE on. Present only when a severity filter was supplied and that version disagrees with the cross-version top severity above — e.g. a CVE scored v2 10.0 (HIGH) and v3.1 9.8 (CRITICAL) headlines as HIGH but matched a CRITICAL v3 query on the 9.8.',
-    ),
-  cisaVulnerabilityName: z
-    .string()
-    .optional()
-    .describe('CISA KEV vulnerability name. Present only when in the KEV catalog.'),
-});
 
 export const nvdSearchCves = tool('nvd_search_cves', {
   title: 'Search CVEs',
@@ -208,7 +173,9 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no CVEs matched or the page offset is past the result set.'),
+      .describe(
+        'Guidance when no CVEs were returned — distinguishes a query nothing matched from an offset past the result set from an empty page NVD returned inside a range it says has matches — or, on a partial page, the offset that reaches the next one.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -491,15 +458,34 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     });
     ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
-      if (result.totalResults > 0) {
+      /**
+       * An empty page only proves the offset overran when the offset is at or past totalCount.
+       * Inside that range NVD contradicted its own count, and neither "lower the offset" nor
+       * "nothing matched" is true — say so rather than sending the caller after a mistake they
+       * did not make.
+       */
+      if (result.totalResults > 0 && input.offset >= result.totalResults) {
         ctx.enrich.notice(
-          `Offset ${result.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+          `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else if (result.totalResults > 0) {
+        ctx.enrich.notice(
+          `NVD reported ${result.totalResults} match(es) but returned no CVEs at offset ${input.offset}, which is inside that range. Retry the query; the offset is not the problem.`,
         );
       } else {
         ctx.enrich.notice(
           'No CVEs matched the search criteria. Try broadening the keyword or date range.',
         );
       }
+    } else if (result.totalResults > result.offset + result.returned) {
+      /**
+       * Offset is zero-based, so `offset + returned` is the index of the first record this page
+       * did not carry — the next page's own offset, not one past it. Naming anything higher skips
+       * a record.
+       */
+      ctx.enrich.notice(
+        `Results truncated — ${result.totalResults} CVEs match; set offset to ${result.offset + result.returned} for the next page.`,
+      );
     }
 
     return { cves: result.cves };

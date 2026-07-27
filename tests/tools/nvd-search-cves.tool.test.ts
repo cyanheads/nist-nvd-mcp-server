@@ -319,6 +319,7 @@ describe('nvdSearchCves', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('9999');
     expect(enrichment.notice).toContain('3095');
+    expect(enrichment.notice).toContain('past the end');
   });
 
   it('enriches notice when no CVEs matched at all (totalResults=0)', async () => {
@@ -465,5 +466,160 @@ describe('nvdSearchCves', () => {
 
     expect(text).toContain('CVE-2022-00001');
     expect(text).not.toContain('undefined');
+  });
+});
+
+/**
+ * Issue #34: an empty page was diagnosed as an offset overrun on `totalResults > 0` alone, so a
+ * valid offset was reported as the caller's mistake. The overrun notice now needs the offset to
+ * have reached totalCount, matching the guard nvd_search_cpes and nvd_audit_cpe use.
+ */
+describe('nvdSearchCves — empty-page notices (issue #34)', () => {
+  const mockService = { searchCves: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.searchCves.mockReset();
+  });
+
+  /** Notice raised for an empty page at `offset` when NVD reports `totalResults` matches. */
+  async function noticeFor(offset: number, totalResults: number): Promise<string | undefined> {
+    mockService.searchCves.mockResolvedValue({ cves: [], totalResults, returned: 0, offset });
+    const ctx = createMockContext();
+    await nvdSearchCves.handler(nvdSearchCves.input.parse({ offset }), ctx);
+    return getEnrichment(ctx).notice;
+  }
+
+  it('blames the offset only once it has reached totalCount', async () => {
+    const notice = await noticeFor(3095, 3095);
+
+    expect(notice).toContain('past the end');
+    expect(notice).toContain('3095');
+    expect(notice).not.toContain('Retry the query');
+  });
+
+  it('does not blame the offset for an empty page inside the result range', async () => {
+    const notice = await noticeFor(40, 3095);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('lower offset');
+    expect(notice).toContain('3095');
+    expect(notice).toContain('40');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('treats an offset one below totalCount as inside the range', async () => {
+    const notice = await noticeFor(3094, 3095);
+
+    expect(notice).not.toContain('past the end');
+    expect(notice).toContain('Retry the query');
+  });
+
+  it('reports a genuinely unmatched query rather than either paging notice', async () => {
+    const notice = await noticeFor(0, 0);
+
+    expect(notice).toContain('No CVEs matched');
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('Retry the query');
+  });
+
+  it('raises no empty-page notice when the page carries results', async () => {
+    mockService.searchCves.mockResolvedValue({
+      cves: [BRIEF_CVE],
+      totalResults: 3095,
+      returned: 1,
+      offset: 40,
+    });
+    const ctx = createMockContext();
+    await nvdSearchCves.handler(nvdSearchCves.input.parse({ offset: 40 }), ctx);
+
+    // A non-empty partial page gets the next-page notice (#36) and none of the empty-page ones.
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('set offset to 41');
+    expect(notice).not.toContain('past the end');
+    expect(notice).not.toContain('Retry the query');
+    expect(notice).not.toContain('No CVEs matched');
+  });
+});
+
+/**
+ * Issue #36: a partial page gave no sign that more results existed, leaving a caller to infer it
+ * from totalCount and compute the next offset itself. Offset is zero-based, so `offset + returned`
+ * IS the next page's offset — naming anything higher would skip a record.
+ */
+describe('nvdSearchCves — next-page notice (issue #36)', () => {
+  const mockService = { searchCves: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.searchCves.mockReset();
+  });
+
+  /** Notice raised for a page of `returned` rows at `offset` out of `totalResults`. */
+  async function noticeFor(
+    offset: number,
+    returned: number,
+    totalResults: number,
+  ): Promise<string | undefined> {
+    mockService.searchCves.mockResolvedValue({
+      cves: Array.from({ length: returned }, (_, i) => ({
+        ...BRIEF_CVE,
+        cveId: `CVE-2024-${String(offset + i).padStart(5, '0')}`,
+      })),
+      totalResults,
+      returned,
+      offset,
+    });
+    const ctx = createMockContext();
+    await nvdSearchCves.handler(
+      nvdSearchCves.input.parse({ keyword: 'log4j', offset, limit: returned || 1 }),
+      ctx,
+    );
+    return getEnrichment(ctx).notice;
+  }
+
+  it('names the next page offset on a partial first page', async () => {
+    const notice = await noticeFor(0, 20, 32);
+
+    expect(notice).toContain('truncated');
+    expect(notice).toContain('32');
+    // 20 rows at offset 0 covers indices 0–19, so the next page starts at 20 — not 21.
+    expect(notice).toContain('set offset to 20');
+    expect(notice).not.toContain('set offset to 21');
+  });
+
+  it('advances the named offset by the page size, leaving no gap', async () => {
+    const notice = await noticeFor(20, 10, 32);
+
+    expect(notice).toContain('set offset to 30');
+  });
+
+  it('omits the notice when the page reaches the end of the result set exactly', async () => {
+    expect(await noticeFor(30, 2, 32)).toBeUndefined();
+    expect(await noticeFor(0, 32, 32)).toBeUndefined();
+  });
+
+  it('omits the notice when a single page carries every match', async () => {
+    expect(await noticeFor(0, 1, 1)).toBeUndefined();
+  });
+
+  it('fires exactly one notice — never a next-page notice on an empty page', async () => {
+    // Empty and partial are mutually exclusive: the next-page branch is the outer `else`.
+    mockService.searchCves.mockResolvedValue({
+      cves: [],
+      totalResults: 32,
+      returned: 0,
+      offset: 99,
+    });
+    const ctx = createMockContext();
+    await nvdSearchCves.handler(nvdSearchCves.input.parse({ keyword: 'log4j', offset: 99 }), ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('past the end');
+    expect(notice).not.toContain('truncated');
   });
 });
