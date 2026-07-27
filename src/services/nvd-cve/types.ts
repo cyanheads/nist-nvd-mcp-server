@@ -164,6 +164,11 @@ export interface BriefCveRecord {
   cisaVulnerabilityName?: string;
   cveId: string;
   /**
+   * Opening slice of the English description (falling back to whatever prose exists), truncated
+   * so a search page stays cheap. Absent when the record carries no description at all.
+   */
+  description?: string;
+  /**
    * Severity at the CVSS version a `severity` filter selected on, when that disagrees with the
    * cross-version `severity` headline. Absent when no filter was applied or the two agree.
    */

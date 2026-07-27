@@ -242,6 +242,56 @@ describe('NvdCpeService — CPE normalization', () => {
     expect(result.cpes[0].title).toBe('Unknown Product');
   });
 
+  // Issue #31: startIndex was hardcoded to 0, so nothing past the first page was reachable.
+  it('maps offset to startIndex and echoes it back', async () => {
+    mockClient.get.mockResolvedValue(makeRawCpeResponse({ totalResults: 21_178 }));
+    const ctx = createMockContext();
+    const result = await service.searchCpes({ keyword: 'apache', limit: 3, offset: 60 }, ctx);
+
+    expect(mockClient.get).toHaveBeenCalledWith(
+      'cpes/2.0',
+      expect.objectContaining({ resultsPerPage: 3, startIndex: 60 }),
+      ctx,
+    );
+    expect(result.offset).toBe(60);
+  });
+
+  it('defaults startIndex to 0 when no offset is supplied', async () => {
+    mockClient.get.mockResolvedValue(makeRawCpeResponse());
+    const ctx = createMockContext();
+    const result = await service.searchCpes({ keyword: 'apache' }, ctx);
+
+    expect(mockClient.get).toHaveBeenCalledWith(
+      'cpes/2.0',
+      expect.objectContaining({ startIndex: 0 }),
+      ctx,
+    );
+    expect(result.offset).toBe(0);
+  });
+
+  // cpes/2.0 caps resultsPerPage at 10,000; startIndex pages independently of that cap.
+  it('keeps a large offset intact while capping resultsPerPage at 10000', async () => {
+    mockClient.get.mockResolvedValue(makeRawCpeResponse({ totalResults: 21_178 }));
+    const ctx = createMockContext();
+    await service.searchCpes({ keyword: 'apache', limit: 99_999, offset: 15_000 }, ctx);
+
+    expect(mockClient.get).toHaveBeenCalledWith(
+      'cpes/2.0',
+      expect.objectContaining({ resultsPerPage: 10_000, startIndex: 15_000 }),
+      ctx,
+    );
+  });
+
+  it('returns an empty page without error when offset runs past totalResults', async () => {
+    mockClient.get.mockResolvedValue({ totalResults: 12, products: [] });
+    const ctx = createMockContext();
+    const result = await service.searchCpes({ keyword: 'apache', offset: 500 }, ctx);
+
+    expect(result.cpes).toHaveLength(0);
+    expect(result.totalResults).toBe(12);
+    expect(result.offset).toBe(500);
+  });
+
   it('passes cpeMatchString to API params when provided', async () => {
     mockClient.get.mockResolvedValue(makeRawCpeResponse());
     const ctx = createMockContext();

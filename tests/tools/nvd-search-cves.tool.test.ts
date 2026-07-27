@@ -428,4 +428,42 @@ describe('nvdSearchCves', () => {
     const entry = nvdSearchCves.errors?.find((e) => e.reason === 'rate_limited');
     expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
   });
+
+  // Issue #32: rows carried identifiers with no prose, so nothing told one result from another.
+  it('carries the description snippet through to the returned rows', async () => {
+    mockService.searchCves.mockResolvedValue(
+      makeSearchResult([{ ...BRIEF_CVE, description: 'Apache Log4j2 JNDI vulnerability.' }]),
+    );
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
+    const result = await nvdSearchCves.handler(input, ctx);
+
+    expect(result.cves[0].description).toBe('Apache Log4j2 JNDI vulnerability.');
+  });
+
+  it('renders the description snippet in format() so content[] matches structuredContent', () => {
+    const blocks = nvdSearchCves.format!({
+      cves: [{ ...BRIEF_CVE, description: 'Apache Log4j2 JNDI vulnerability.' }],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('Apache Log4j2 JNDI vulnerability.');
+    expect(text).toContain('CVE-2021-44228');
+  });
+
+  it('renders a truncated snippet with its ellipsis intact', () => {
+    const truncated = `${'A'.repeat(200)}…`;
+    const blocks = nvdSearchCves.format!({ cves: [{ ...BRIEF_CVE, description: truncated }] });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain(truncated);
+  });
+
+  it('renders a row with no description without emitting an undefined placeholder', () => {
+    const blocks = nvdSearchCves.format!({ cves: [BRIEF_CVE_NO_SEVERITY] });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('CVE-2022-00001');
+    expect(text).not.toContain('undefined');
+  });
 });

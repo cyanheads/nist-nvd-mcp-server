@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
 const CPE_V23_REGEX = /^cpe:2\.3:/i;
@@ -34,37 +35,8 @@ const CpeMatchSchema = z.object({
   versionEndExcluding: z.string().optional().describe('Exclusive upper version bound.'),
 });
 
-/** Cap on CPE match criteria rendered per CVE — mirrors the references cap in this formatter. */
-const CPE_MATCH_CAP = 5;
-
-/**
- * Render one CPE match as a single line: the criteria string, its version bounds, and the
- * operators that govern it. `nodeOperator` combines the matches inside a node; `groupOperator`
- * combines sibling nodes in the group, so an `AND` there marks conditions that hold together
- * (e.g. a firmware match and the hardware it runs on) rather than independent alternatives.
- */
-function formatCpeMatch(
-  match: z.infer<typeof CpeMatchSchema>,
-  groupOperator: string | undefined,
-  nodeOperator: string | undefined,
-): string {
-  const bounds = [
-    match.versionStartIncluding && `>= ${match.versionStartIncluding}`,
-    match.versionStartExcluding && `> ${match.versionStartExcluding}`,
-    match.versionEndIncluding && `<= ${match.versionEndIncluding}`,
-    match.versionEndExcluding && `< ${match.versionEndExcluding}`,
-  ].filter(Boolean);
-  const notes = [
-    nodeOperator,
-    groupOperator && `${groupOperator} with sibling nodes`,
-    match.vulnerable ? undefined : 'not the vulnerable component',
-  ].filter(Boolean);
-  return (
-    `${match.criteria}` +
-    (bounds.length > 0 ? ` (${bounds.join(', ')})` : '') +
-    (notes.length > 0 ? ` [${notes.join('; ')}]` : '')
-  );
-}
+/** References rendered per CVE — this tool returns full records for many CVEs at once. */
+const REFERENCE_CAP = 5;
 
 const CveRecordSchema = z.object({
   cveId: z.string().describe('CVE identifier (e.g., "CVE-2021-44228").'),
@@ -211,6 +183,15 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       .max(2000)
       .default(20)
       .describe('Maximum number of CVEs to return (default 20, max 2000).'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Zero-based page offset for pagination. Page through totalCount with a modest limit ' +
+          'rather than raising limit — this tool returns full CVE records, so a large limit is a large response.',
+      ),
   }),
 
   output: z.object({
@@ -224,6 +205,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   enrichment: {
     totalCount: z.number().describe('Total CVEs matched before pagination.'),
     returned: z.number().describe('Number of CVE records returned.'),
+    offset: z.number().describe('Page offset used in this query.'),
     auditTarget: z.string().describe('The CPE name or virtual match string used for this audit.'),
     severityMin: z
       .string()
@@ -245,6 +227,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
 
   enrichmentTrailer: {
     returned: { label: 'Returned' },
+    offset: { label: 'Offset' },
     auditTarget: { label: 'Audit Target' },
     severityMin: { label: 'Severity Filter' },
     filteredCount: { label: 'Dropped by Severity Filter' },
@@ -338,6 +321,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       cpeName: input.cpeName,
       virtualMatchString: input.virtualMatchString,
       limit: input.limit,
+      offset: input.offset,
     });
 
     const service = getNvdCveService();
@@ -352,6 +336,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         ...(input.severityMin && { severityMin: input.severityMin }),
         allLanguages: input.allLanguages,
         limit: input.limit,
+        offset: input.offset,
       },
       ctx,
     );
@@ -359,6 +344,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     const auditTarget = result.cpeName ?? result.virtualMatchString ?? 'unknown CPE';
     ctx.enrich({
       returned: result.returned,
+      offset: result.offset,
       auditTarget,
       ...(input.severityMin && {
         severityMin: input.severityMin,
@@ -367,9 +353,15 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     });
     ctx.enrich.total(result.totalResults);
     if (result.cves.length === 0) {
-      // Distinguish "the CPE has no CVEs" from "severityMin dropped everything on the page":
-      // filteredCount > 0 means NVD did return CVEs, they were just below the threshold.
-      if (input.severityMin && result.filteredCount > 0) {
+      // Distinguish "the CPE has no CVEs" from "severityMin dropped everything on the page" from
+      // "the offset ran off the end": filteredCount > 0 means NVD did return CVEs, they were just
+      // below the threshold; an offset at or past totalCount means the product has CVEs but this
+      // page is empty, so telling the caller to re-check the CPE would send them the wrong way.
+      if (result.totalResults > 0 && input.offset >= result.totalResults) {
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else if (input.severityMin && result.filteredCount > 0) {
         ctx.enrich.notice(
           `All ${result.filteredCount} CVE(s) on the fetched page scored below ${input.severityMin}. ` +
             'Lower severityMin or raise limit to widen the page NVD returns.',
@@ -438,11 +430,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       }
 
       if (cve.configurations && cve.configurations.length > 0) {
-        const matches = cve.configurations.flatMap((cfg) =>
-          cfg.nodes.flatMap((node) =>
-            node.cpeMatch.map((m) => formatCpeMatch(m, cfg.operator, node.operator)),
-          ),
-        );
+        const matches = flattenCpeMatches(cve.configurations);
         lines.push(
           `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
         );
@@ -454,12 +442,14 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
 
       if (cve.references && cve.references.length > 0) {
         lines.push(`**References (${cve.references.length}):**`);
-        for (const ref of cve.references.slice(0, 5)) {
+        for (const ref of cve.references.slice(0, REFERENCE_CAP)) {
           const sourcePart = ref.source ? ` [${ref.source}]` : '';
           const tagPart = ref.tags?.length ? ` (${ref.tags.join(', ')})` : '';
           lines.push(`  - ${ref.url}${sourcePart}${tagPart}`);
         }
-        if (cve.references.length > 5) lines.push(`  - … ${cve.references.length - 5} more`);
+        if (cve.references.length > REFERENCE_CAP) {
+          lines.push(`  - … ${cve.references.length - REFERENCE_CAP} more`);
+        }
       }
 
       lines.push('');

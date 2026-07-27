@@ -39,9 +39,15 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       .min(1)
       .max(10_000)
       .default(20)
+      .describe('Maximum number of CPE entries to return (default 20, max 10000).'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
       .describe(
-        'Maximum number of CPE entries to return (default 20, max 10000). ' +
-          'If totalResults > returned, narrow the keyword for a more specific result.',
+        'Zero-based page offset for pagination. When totalCount exceeds offset + returned, ' +
+          'raise offset to reach the rest — a vendor-level keyword has nothing left to narrow toward.',
       ),
   }),
 
@@ -77,14 +83,18 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   enrichment: {
     totalCount: z.number().describe('Total matching CPE entries before the limit was applied.'),
     returned: z.number().describe('Number of entries returned in this response.'),
+    offset: z.number().describe('Page offset used in this query.'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no CPEs matched or results were truncated.'),
+      .describe(
+        'Guidance when no CPEs matched, the offset ran past the result set, or entries remain beyond this page.',
+      ),
   },
 
   enrichmentTrailer: {
     returned: { label: 'Returned' },
+    offset: { label: 'Offset' },
   },
 
   errors: [
@@ -133,24 +143,38 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       keyword: input.keyword,
       cpeMatchString: input.cpeMatchString,
       limit: input.limit,
+      offset: input.offset,
     });
 
     const service = getNvdCpeService();
     const result = await service.searchCpes(
       {
         limit: input.limit,
+        offset: input.offset,
         ...(input.keyword && { keyword: input.keyword }),
         ...(input.cpeMatchString && { cpeMatchString: input.cpeMatchString }),
       },
       ctx,
     );
 
-    ctx.enrich({ returned: result.returned });
+    ctx.enrich({ returned: result.returned, offset: result.offset });
     ctx.enrich.total(result.totalResults);
     if (result.cpes.length === 0) {
-      ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');
-    } else if (result.totalResults > result.returned) {
-      ctx.enrich.notice('Results truncated — narrow the keyword for more specific results.');
+      if (result.totalResults > 0 && input.offset >= result.totalResults) {
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
+        );
+      } else {
+        ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');
+      }
+    } else if (result.totalResults > result.offset + result.returned) {
+      /**
+       * A vendor-level keyword is already as specific as the vendor gets, so "narrow the keyword"
+       * has no move behind it — point at the offset that actually reaches the remainder.
+       */
+      ctx.enrich.notice(
+        `Results truncated — ${result.totalResults} entries match; set offset to ${result.offset + result.returned} for the next page.`,
+      );
     }
 
     return { cpes: result.cpes };

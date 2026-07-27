@@ -5,8 +5,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
+import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
+import { briefDescription, getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
+
+/**
+ * References rendered per CVE. A dense record runs to ~100 references at roughly 116 bytes a line
+ * (CVE-2021-44228 carries 103, ~11.6KB rendered in full). 15 covers the advisory/patch/exploit
+ * cluster a triage decision turns on for ~2KB per record, and the trailer discloses the remainder
+ * that `structuredContent` still carries in full.
+ */
+export const REFERENCE_CAP = 15;
 
 export const nvdGetCve = tool('nvd_get_cve', {
   title: 'Get CVE Details',
@@ -33,8 +42,8 @@ export const nvdGetCve = tool('nvd_get_cve', {
       .boolean()
       .default(false)
       .describe(
-        'When true, returns trimmed records (ID, status, top CVSS score, KEV name, published date) ' +
-          'instead of full detail. Recommended for batches of more than 10 IDs.',
+        'When true, returns trimmed records (ID, status, top CVSS score, KEV name, published date, ' +
+          'and a truncated description) instead of full detail. Recommended for batches of more than 10 IDs.',
       ),
     includeReferences: z
       .boolean()
@@ -44,9 +53,9 @@ export const nvdGetCve = tool('nvd_get_cve', {
       .boolean()
       .default(false)
       .describe(
-        'When true, keeps every localized description NVD supplies on each record. ' +
-          'Default keeps English only, falling back to whatever exists if a record has no English entry. ' +
-          'Applies to full records; brief records carry no descriptions.',
+        'When true, keeps every localized description NVD supplies on each record, and full records ' +
+          'render all of them. Default keeps English only, falling back to whatever exists if a record ' +
+          'has no English entry. Brief records always carry a single truncated description.',
       ),
   }),
 
@@ -130,13 +139,17 @@ export const nvdGetCve = tool('nvd_get_cve', {
     if (input.brief) {
       return {
         brief: true,
-        cves: result.cves.map((cve) => ({
-          cveId: cve.cveId,
-          vulnStatus: cve.vulnStatus,
-          published: cve.published,
-          ...(cve.severity && { severity: cve.severity }),
-          ...(cve.cisaKev && { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName }),
-        })) as Record<string, unknown>[],
+        cves: result.cves.map((cve) => {
+          const description = briefDescription(cve.descriptions);
+          return {
+            cveId: cve.cveId,
+            vulnStatus: cve.vulnStatus,
+            published: cve.published,
+            ...(description && { description }),
+            ...(cve.severity && { severity: cve.severity }),
+            ...(cve.cisaKev && { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName }),
+          };
+        }) as Record<string, unknown>[],
       };
     }
 
@@ -165,6 +178,9 @@ export const nvdGetCve = tool('nvd_get_cve', {
         if (cve.cisaVulnerabilityName) {
           lines.push(`**CISA KEV:** ${cve.cisaVulnerabilityName}`);
         }
+        if (cve.description) {
+          lines.push(cve.description);
+        }
       } else {
         const cve = rawCve as unknown as CveRecord;
         lines.push(`## ${cve.cveId}`);
@@ -189,11 +205,14 @@ export const nvdGetCve = tool('nvd_get_cve', {
           }
         }
 
-        if (cve.descriptions && cve.descriptions.length > 0) {
-          // English-only is the default, but a record with no English entry falls back to the
-          // first available language — render that rather than leaving text-only clients blank.
-          const desc = cve.descriptions.find((d) => d.lang === 'en') ?? cve.descriptions[0];
-          if (desc) lines.push(`\n${desc.value}`);
+        /**
+         * Render every description the record carries. The service already applied the language
+         * policy — English-only by default (falling back when a record has no English entry),
+         * every language when `allLanguages` is set — so picking one here would make that input
+         * inert for clients that read `content[]` instead of `structuredContent`.
+         */
+        for (const desc of cve.descriptions ?? []) {
+          lines.push(`\n[${desc.lang}] ${desc.value}`);
         }
 
         if (cve.weaknesses && cve.weaknesses.length > 0) {
@@ -202,7 +221,16 @@ export const nvdGetCve = tool('nvd_get_cve', {
         }
 
         if (cve.configurations && cve.configurations.length > 0) {
-          lines.push(`**Configurations:** ${cve.configurations.length} node group(s)`);
+          const matches = flattenCpeMatches(cve.configurations);
+          lines.push(
+            `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
+          );
+          for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
+          if (matches.length > CPE_MATCH_CAP) {
+            lines.push(
+              `  - … ${matches.length - CPE_MATCH_CAP} more — call nvd_audit_cpe with a specific cpeName to test whether a product version is affected.`,
+            );
+          }
         }
 
         if (cve.cisaKev) {
@@ -215,11 +243,11 @@ export const nvdGetCve = tool('nvd_get_cve', {
 
         if (cve.references && cve.references.length > 0) {
           lines.push(`\n**References (${cve.references.length}):**`);
-          for (const ref of cve.references.slice(0, 5)) {
+          for (const ref of cve.references.slice(0, REFERENCE_CAP)) {
             lines.push(`- ${ref.url}${ref.tags?.length ? ` [${ref.tags.join(', ')}]` : ''}`);
           }
-          if (cve.references.length > 5) {
-            lines.push(`- … ${cve.references.length - 5} more references`);
+          if (cve.references.length > REFERENCE_CAP) {
+            lines.push(`- … ${cve.references.length - REFERENCE_CAP} more references`);
           }
         }
       }

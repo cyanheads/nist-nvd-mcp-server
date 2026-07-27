@@ -30,8 +30,8 @@ const CPE_NO_TITLE: CpeRecord = {
   deprecated: false,
 };
 
-function makeSearchResult(cpes: CpeRecord[] = [CPE_APACHE], total = 1) {
-  return { cpes, totalResults: total, returned: cpes.length };
+function makeSearchResult(cpes: CpeRecord[] = [CPE_APACHE], total = 1, offset = 0) {
+  return { cpes, totalResults: total, returned: cpes.length, offset };
 }
 
 describe('nvdSearchCpes', () => {
@@ -100,7 +100,12 @@ describe('nvdSearchCpes', () => {
   });
 
   it('handles empty search results with enriched notice', async () => {
-    mockService.searchCpes.mockResolvedValue({ cpes: [], totalResults: 0, returned: 0 });
+    mockService.searchCpes.mockResolvedValue({
+      cpes: [],
+      totalResults: 0,
+      returned: 0,
+      offset: 0,
+    });
     const ctx = createMockContext();
     const input = nvdSearchCpes.input.parse({ keyword: 'nonexistent_product_xyz' });
     const result = await nvdSearchCpes.handler(input, ctx);
@@ -160,6 +165,7 @@ describe('nvdSearchCpes', () => {
       cpes: [CPE_APACHE],
       totalResults: 100,
       returned: 1,
+      offset: 0,
     });
     const ctx = createMockContext();
     const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
@@ -167,6 +173,72 @@ describe('nvdSearchCpes', () => {
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('truncated');
+  });
+
+  // Issue #31: startIndex was hardcoded to 0, so results past the first page were unreachable.
+  it('threads offset through to the service and echoes it in enrichment', async () => {
+    mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 21_178, 60));
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 3, offset: 60 });
+    await nvdSearchCpes.handler(input, ctx);
+
+    const params = mockService.searchCpes.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.offset).toBe(60);
+    expect(params.limit).toBe(3);
+    expect(getEnrichment(ctx).offset).toBe(60);
+  });
+
+  it('defaults offset to 0 when omitted', async () => {
+    mockService.searchCpes.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
+    await nvdSearchCpes.handler(input, ctx);
+
+    const params = mockService.searchCpes.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.offset).toBe(0);
+    expect(getEnrichment(ctx).offset).toBe(0);
+  });
+
+  // "Narrow the keyword" has no move behind it when the keyword is already the vendor — the
+  // notice must name the offset that actually reaches the remainder.
+  it('points the truncation notice at paging rather than at narrowing the keyword', async () => {
+    mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 21_178, 60));
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 1, offset: 60 });
+    await nvdSearchCpes.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('offset');
+    expect(notice).toContain('61');
+    expect(notice).not.toContain('narrow the keyword');
+  });
+
+  it('omits the truncation notice when the page reaches the end of the result set', async () => {
+    // offset 60 + 1 returned === totalResults 61: nothing is left, so no "more available" nudge.
+    mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 61, 60));
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 1, offset: 60 });
+    await nvdSearchCpes.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('distinguishes an offset past the end from a keyword that matched nothing', async () => {
+    mockService.searchCpes.mockResolvedValue({
+      cpes: [],
+      totalResults: 12,
+      returned: 0,
+      offset: 500,
+    });
+    const ctx = createMockContext();
+    const input = nvdSearchCpes.input.parse({ keyword: 'apache', offset: 500 });
+    await nvdSearchCpes.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('past the end');
+    expect(notice).toContain('12');
+    // The keyword matched 12 entries — telling the caller to broaden it would be wrong.
+    expect(notice).not.toContain('No CPEs matched');
   });
 
   // Issue #10: malformed CPE strings should fail locally before hitting NVD

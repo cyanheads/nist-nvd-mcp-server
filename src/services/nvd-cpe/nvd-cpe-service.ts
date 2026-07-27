@@ -41,14 +41,17 @@ export class NvdCpeService {
       keyword?: string;
       cpeMatchString?: string;
       limit?: number;
+      /** Zero-based index of the first entry to return — maps to NVD's `startIndex`. */
+      offset?: number;
     },
     ctx: Context,
-  ): Promise<{ cpes: CpeRecord[]; totalResults: number; returned: number }> {
+  ): Promise<{ cpes: CpeRecord[]; totalResults: number; returned: number; offset: number }> {
     const client = getNvdHttpClient();
 
+    // `cpes/2.0` caps `resultsPerPage` at 10,000; `startIndex` pages independently of that cap.
     const apiParams: Record<string, string | number | boolean | undefined> = {
       resultsPerPage: Math.min(params.limit ?? 20, 10_000),
-      startIndex: 0,
+      startIndex: params.offset ?? 0,
     };
 
     if (params.keyword) apiParams.keywordSearch = params.keyword;
@@ -63,7 +66,7 @@ export class NvdCpeService {
 
     ctx.log.info('CPE search completed', { totalResults, returned: cpes.length });
 
-    return { cpes, totalResults, returned: cpes.length };
+    return { cpes, totalResults, returned: cpes.length, offset: params.offset ?? 0 };
   }
 }
 

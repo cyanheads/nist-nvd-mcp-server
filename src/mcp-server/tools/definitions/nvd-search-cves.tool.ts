@@ -25,6 +25,14 @@ const BriefCveRecordSchema = z.object({
   cveId: z.string().describe('CVE identifier (e.g., "CVE-2021-44228").'),
   vulnStatus: z.string().describe('NVD analysis status.'),
   published: z.string().describe('ISO 8601 publication datetime.'),
+  description: z
+    .string()
+    .optional()
+    .describe(
+      'Opening 200 characters of the English CVE description, truncated with an ellipsis when longer. ' +
+        'Enough to tell one result from another; call nvd_get_cve for the full text. ' +
+        'Absent when NVD carries no description for the record.',
+    ),
   severity: z
     .object({
       label: z.string().describe('Highest severity label across all CVSS versions.'),
@@ -524,6 +532,10 @@ export const nvdSearchCves = tool('nvd_search_cves', {
 
       if (cve.cisaVulnerabilityName) {
         lines.push(`**CISA KEV:** ${cve.cisaVulnerabilityName}`);
+      }
+
+      if (cve.description) {
+        lines.push(cve.description);
       }
 
       lines.push('');

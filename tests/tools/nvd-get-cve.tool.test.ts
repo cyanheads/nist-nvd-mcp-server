@@ -6,8 +6,10 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { nvdGetCve } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
+import { nvdGetCve, REFERENCE_CAP } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
+import { CPE_MATCH_CAP } from '@/mcp-server/tools/formatting/cpe-match.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
+import { BRIEF_DESCRIPTION_CHARS } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord } from '@/services/nvd-cve/types.js';
 
 const FULL_CVE: CveRecord = {
@@ -285,5 +287,189 @@ describe('nvdGetCve', () => {
   it('declares rate_limited with the RateLimited error code', () => {
     const entry = nvdGetCve.errors?.find((e) => e.reason === 'rate_limited');
     expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
+  });
+
+  // Issue #32: brief rows carried no prose, so a bulk lookup said nothing about what each CVE is.
+  it('puts a truncated description on brief rows and renders it', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [FULL_CVE],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
+    const result = await nvdGetCve.handler(input, ctx);
+
+    const cve = result.cves[0] as { description?: string };
+    expect(cve.description).toBe('Apache Log4j2 JNDI vulnerability.');
+
+    const text = (nvdGetCve.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('Apache Log4j2 JNDI vulnerability.');
+  });
+
+  it('truncates a long brief description at the shared 200-character budget', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [{ ...FULL_CVE, descriptions: [{ lang: 'en', value: `${'A'.repeat(400)}END` }] }],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
+    const result = await nvdGetCve.handler(input, ctx);
+
+    const description = (result.cves[0] as { description?: string }).description as string;
+    expect(description).toBe(`${'A'.repeat(BRIEF_DESCRIPTION_CHARS)}…`);
+    expect(description).not.toContain('END');
+  });
+
+  it('falls back to non-English prose on a brief row with no English entry', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [
+        {
+          ...FULL_CVE,
+          descriptions: [{ lang: 'es', value: 'Vulnerabilidad JNDI en Apache Log4j2.' }],
+        },
+      ],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
+    const result = await nvdGetCve.handler(input, ctx);
+
+    expect((result.cves[0] as { description?: string }).description).toBe(
+      'Vulnerabilidad JNDI en Apache Log4j2.',
+    );
+  });
+
+  it('omits description from a brief row when the record carries none', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [SPARSE_CVE],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2022-00001', brief: true });
+    const result = await nvdGetCve.handler(input, ctx);
+
+    expect(result.cves[0]).not.toHaveProperty('description');
+    const text = (nvdGetCve.format!(result)[0] as { text: string }).text;
+    expect(text).not.toContain('undefined');
+  });
+});
+
+/**
+ * Issue #30: full-mode format() dropped data structuredContent carried — configurations rendered
+ * as a bare group count, references were cut at five, and allLanguages never reached content[].
+ */
+describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
+  /** `count` CPE matches in one node, so the cap boundary can be driven exactly. */
+  function cveWithMatches(count: number): Record<string, unknown> {
+    return {
+      ...FULL_CVE,
+      configurations: [
+        {
+          nodes: [
+            {
+              operator: 'OR',
+              cpeMatch: Array.from({ length: count }, (_, i) => ({
+                vulnerable: true,
+                criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
+                versionEndExcluding: '2.15.0',
+              })),
+            },
+          ],
+        },
+      ],
+    } as unknown as Record<string, unknown>;
+  }
+
+  function cveWithReferences(count: number): Record<string, unknown> {
+    return {
+      ...FULL_CVE,
+      references: Array.from({ length: count }, (_, i) => ({
+        url: `https://example.invalid/advisory/${i}`,
+        tags: ['Vendor Advisory'],
+      })),
+    } as unknown as Record<string, unknown>;
+  }
+
+  const render = (cves: Record<string, unknown>[]) =>
+    (nvdGetCve.format!({ brief: false, cves })[0] as { text: string }).text;
+
+  it('renders actual CPE match criteria and version bounds, not just a group count', () => {
+    const text = render([cveWithMatches(1)]);
+
+    expect(text).toContain('cpe:2.3:o:fedoraproject:fedora:30:*:*:*:*:*:*:*');
+    expect(text).toContain('< 2.15.0');
+    expect(text).toContain('1 node group(s), 1 CPE match(es)');
+    // The old formatter stopped at the group count and printed no criteria at all.
+    expect(text).not.toMatch(/\*\*Configurations:\*\* 1 node group\(s\)\s*$/m);
+  });
+
+  it('omits the CPE-match trailer when the count is exactly the cap', () => {
+    const text = render([cveWithMatches(CPE_MATCH_CAP)]);
+
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(CPE_MATCH_CAP);
+    expect(text).not.toContain('more —');
+  });
+
+  it('adds the CPE-match trailer at one past the cap and points at the retrieval path', () => {
+    const text = render([cveWithMatches(CPE_MATCH_CAP + 1)]);
+
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(CPE_MATCH_CAP);
+    expect(text).toContain('… 1 more');
+    // A capped remainder with no way to reach it is a dead end — name the tool that gets there.
+    expect(text).toContain('nvd_audit_cpe');
+  });
+
+  it('omits the references trailer when the count is exactly the cap', () => {
+    const text = render([cveWithReferences(REFERENCE_CAP)]);
+
+    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(REFERENCE_CAP);
+    expect(text).not.toContain('more references');
+  });
+
+  it('adds the references trailer at one past the cap', () => {
+    const text = render([cveWithReferences(REFERENCE_CAP + 1)]);
+
+    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(REFERENCE_CAP);
+    expect(text).toContain('… 1 more references');
+  });
+
+  it('renders every language a record carries so allLanguages reaches content[]', () => {
+    const bilingual = {
+      ...FULL_CVE,
+      descriptions: [
+        { lang: 'en', value: 'Buffer overflow in mod_lua.' },
+        { lang: 'es', value: 'Desbordamiento de bufer en mod_lua.' },
+      ],
+    } as unknown as Record<string, unknown>;
+    const text = render([bilingual]);
+
+    expect(text).toContain('Buffer overflow in mod_lua.');
+    // Previously the picker took the English entry and the Spanish one never rendered.
+    expect(text).toContain('Desbordamiento de bufer en mod_lua.');
+    expect(text).toContain('[en]');
+    expect(text).toContain('[es]');
+  });
+
+  it('renders the single English description under the default language policy', () => {
+    const text = render([FULL_CVE as unknown as Record<string, unknown>]);
+
+    expect(text).toContain('[en] Apache Log4j2 JNDI vulnerability.');
+    expect(text).not.toContain('[es]');
+  });
+
+  it('renders nothing for descriptions when a record carries none', () => {
+    const text = render([SPARSE_CVE as unknown as Record<string, unknown>]);
+
+    expect(text).toContain('CVE-2022-00001');
+    expect(text).not.toContain('undefined');
+    expect(text).not.toMatch(/\[\w*\]\s*$/m);
   });
 });

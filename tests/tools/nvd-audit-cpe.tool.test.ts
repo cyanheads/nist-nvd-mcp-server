@@ -129,6 +129,7 @@ function makeAuditResult(
     cves,
     totalResults: cves.length,
     returned: cves.length,
+    offset: 0,
     ...extra,
   };
 }
@@ -338,6 +339,7 @@ describe('nvdAuditCpe', () => {
       cves: [],
       totalResults: 0,
       returned: 0,
+      offset: 0,
       cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
     });
     const ctx = createMockContext();
@@ -357,6 +359,7 @@ describe('nvdAuditCpe', () => {
       cves: [],
       totalResults: 3,
       returned: 0,
+      offset: 0,
       filteredCount: 3,
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
     });
@@ -384,6 +387,7 @@ describe('nvdAuditCpe', () => {
       cves: [FULL_CVE],
       totalResults: 5,
       returned: 1,
+      offset: 0,
       filteredCount: 2,
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
     });
@@ -406,6 +410,7 @@ describe('nvdAuditCpe', () => {
       cves: [],
       totalResults: 0,
       returned: 0,
+      offset: 0,
       filteredCount: 0,
       virtualMatchString: 'cpe:2.3:a:nonexistent:product:*',
     });
@@ -451,5 +456,86 @@ describe('nvdAuditCpe', () => {
   it('declares rate_limited with the RateLimited error code', () => {
     const entry = nvdAuditCpe.errors?.find((e) => e.reason === 'rate_limited');
     expect(entry?.code).toBe(JsonRpcErrorCode.RateLimited);
+  });
+
+  // Issue #31: without offset, results past the first page were unreachable at any limit.
+  it('threads offset through to the service and echoes it in enrichment', async () => {
+    mockService.auditCpe.mockResolvedValue(
+      makeAuditResult([FULL_CVE], {
+        virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+        totalResults: 351,
+        offset: 300,
+      }),
+    );
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+      limit: 2,
+      offset: 300,
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const params = mockService.auditCpe.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.offset).toBe(300);
+    expect(params.limit).toBe(2);
+    expect(getEnrichment(ctx).offset).toBe(300);
+  });
+
+  it('defaults offset to 0 when omitted', async () => {
+    mockService.auditCpe.mockResolvedValue(makeAuditResult());
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const params = mockService.auditCpe.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.offset).toBe(0);
+    expect(getEnrichment(ctx).offset).toBe(0);
+  });
+
+  it('names the offset rather than the CPE when the page runs past the result set', async () => {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 351,
+      returned: 0,
+      offset: 5000,
+      filteredCount: 0,
+      virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+      offset: 5000,
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('past the end');
+    expect(notice).toContain('351');
+    // The CPE matched 351 CVEs — sending the caller to re-check its spelling would be wrong.
+    expect(notice).not.toContain('nvd_search_cpes');
+  });
+
+  it('keeps the severity-filter notice when an offset-0 page was emptied by severityMin', async () => {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults: 3,
+      returned: 0,
+      offset: 0,
+      filteredCount: 3,
+      cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
+    });
+    const ctx = createMockContext();
+    const input = nvdAuditCpe.input.parse({
+      cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
+      severityMin: 'CRITICAL',
+      offset: 0,
+    });
+    await nvdAuditCpe.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('CRITICAL');
+    expect(notice).not.toContain('past the end');
   });
 });
