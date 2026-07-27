@@ -8,8 +8,8 @@
 |:-----|:------------|:-----------|:------------|:-------|
 | `nvd_get_cve` | Fetch one or more CVEs by ID. Returns full details: CVSS scores (all available versions), CWE weaknesses, affected CPE configurations, CISA KEV fields, and references. Up to 100 IDs per call; use `brief` mode for bulk lookups to control output size. | `cveIds` (up to 100), `brief`, `includeReferences`, `allLanguages` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
 | `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (InvalidParams), `date_range_exceeds_max` (InvalidParams), `rate_limited` (RateLimited) |
-| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (RateLimited) |
-| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (RateLimited) |
+| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit`, `offset` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (RateLimited) |
+| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (RateLimited) |
 | `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit`, `offset`, `order` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `rate_limited` (RateLimited) |
 
 ### Resources
@@ -156,7 +156,7 @@ The tool description documents this explicitly so agents make the tradeoff delib
 - `pubDays: N` → `pubStartDate = now − N days`, `pubEndDate = now`
 - `lastModDays: N` → `lastModStartDate = now − N days`, `lastModEndDate = now`
 
-The NVD API enforces a 120-day maximum range. If either param exceeds 120, the tool clamps the value to 120, returns the clamped dates used in a `queryMeta.datesClamped` field, and includes a warning in the response so the agent knows the window was narrowed. Passing both `pubDays` and the raw `pubStartDate`/`pubEndDate` params simultaneously is a validation error — they're mutually exclusive.
+The NVD API enforces a 120-day maximum range. If either param exceeds 120, the tool clamps the value to 120 and reports the clamping in the `datesClamped` enrichment field so the agent knows the window was narrowed. Passing both `pubDays` and the raw `pubStartDate`/`pubEndDate` params simultaneously is a validation error — they're mutually exclusive.
 
 ### Rate limiting: queue, not per-call sleep
 
@@ -222,14 +222,21 @@ Present only when the CVE appears in the CISA KEV catalog:
 
 **Input:**
 - `cveIds: string | string[]` — one CVE ID or an array of up to 100 (e.g., `"CVE-2021-44228"` or `["CVE-2021-44228", "CVE-2022-0001"]`)
-- `brief?: boolean` — default `false`. When `true`, returns trimmed records (ID, status, top CVSS score, KEV name, published date) instead of full detail. Recommended for batches of more than 10.
+- `brief?: boolean` — default `false`. When `true`, returns trimmed records (ID, status, top CVSS score, KEV name, published date, truncated description) instead of full detail. Recommended for batches of more than 10.
 - `includeReferences?: boolean` — default `true`. Set to `false` to omit the references array and reduce response size.
-- `allLanguages?: boolean` — default `false`. When `false`, full records keep only the English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description. No effect in brief mode.
+- `allLanguages?: boolean` — default `false`. When `false`, full records keep only the English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description. Brief records always carry a single truncated description.
 
 **Output:**
+- `brief: boolean` — which mode produced the records below.
 - `cves: CveRecord[]` — array of CVE records. Each record includes: `cveId`, `vulnStatus`, `published`, `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `cisaKev` (if in KEV catalog).
-- In brief mode: `cves: BriefCveRecord[]` — trimmed to `cveId`, `vulnStatus`, `published`, `severity`, `cisaVulnerabilityName`.
-- `queryMeta: { requested: number, returned: number }` — count parity check.
+- In brief mode: `cves: BriefCveRecord[]` — trimmed to `cveId`, `vulnStatus`, `published`, `description` (first 200 characters, English-preferred), `severity`, `cisaVulnerabilityName`.
+
+**Enrichment:** this tool looks up specific IDs rather than paging a result set, so it carries no pagination fields.
+- `requested: number` — how many CVE IDs the call asked for
+- `returned: number` — how many records came back
+- `missingIds?: string[]` — requested IDs NVD held no record for; absent when every ID matched
+
+**Rendering caps.** `structuredContent` always carries the whole record. The formatted text renders CPE match criteria capped at the first 5 per CVE and references at the first 15, each with a `… N more` trailer. Both are bounded for the same reason: `cveIds` accepts up to 100 IDs, and a single dense CVE can carry hundreds of criteria (CVE-2021-44228 has 396 across 20 node groups — ~27.8KB rendered in full versus ~0.36KB capped, plus 103 references at ~11.6KB versus ~2.07KB capped). The criteria trailer points at `nvd_audit_cpe`, which is how a caller reaches the remainder: auditing a specific `cpeName` answers whether a given product version is affected without enumerating every criterion. Descriptions are not capped by count — the formatter renders every language the record carries, so `allLanguages` reaches `content[]` clients and not just `structuredContent` ones.
 
 **Errors:**
 ```
@@ -252,7 +259,7 @@ errors: [
 
 ### `nvd_search_cves`
 
-**Description:** Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays` and `lastModDays` are convenience shorthands for date-range queries — the tool converts them to API date pairs and clamps values over 120 days (the API maximum), reporting the clamped range in `queryMeta`.
+**Description:** Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays` and `lastModDays` are convenience shorthands for date-range queries — the tool converts them to API date pairs and clamps values over 120 days (the API maximum), reporting the clamped range in the response enrichment.
 
 **Input:**
 - `keyword?: string` — full-text search across CVE descriptions (AND-semantics across words)
@@ -269,8 +276,15 @@ errors: [
 - `offset?: number` — zero-based page offset
 
 **Output:**
-- `cves: BriefCveRecord[]` — array of CVE summaries (search results are always brief; call `nvd_get_cve` for full detail on specific IDs)
-- `queryMeta: { totalResults: number, returned: number, offset: number, datesClamped?: { param: string, original: number, clamped: number }[] }` — includes `datesClamped` when a `pubDays`/`lastModDays` value was reduced to 120
+- `cves: BriefCveRecord[]` — array of CVE summaries, each `{ cveId, vulnStatus, published, description?, severity?, filteredSeverity?, cisaVulnerabilityName? }`. `description` is the first 200 characters of the English text (English-preferred, falling back to whatever prose exists), enough to tell one hit from another without a follow-up fetch; call `nvd_get_cve` for full detail on specific IDs.
+
+**Enrichment:**
+- `totalCount: number` — total matching CVEs in NVD before pagination
+- `returned: number` — CVEs in this response
+- `offset: number` — page offset used
+- `datesClamped?: { param, original, clamped }[]` — present when a `pubDays`/`lastModDays` value was reduced to 120
+- `filtersApplied?: { keyword?, severity?, severityVersion?, cweId?, kevOnly?, noRejected? }` — only the non-default filters the query actually applied, so an empty or unexpectedly narrow result set is accountable; absent when the query ran unfiltered
+- `notice?: string` — guidance when nothing matched or the offset ran past the result set
 
 **Errors:**
 ```
@@ -300,17 +314,28 @@ errors: [
 - `virtualMatchString?: string` — partial CPE match pattern (e.g., `"cpe:2.3:a:apache:http_server:*"`). Use with version range params for range-based audits.
 - `versionStart?: string`, `versionStartType?: 'including' | 'excluding'` — lower version bound; requires `virtualMatchString`
 - `versionEnd?: string`, `versionEndType?: 'including' | 'excluding'` — upper version bound; requires `virtualMatchString`
-- `severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — filter out CVEs below this severity
+- `severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — filter out CVEs below this severity. Applied after NVD returns the page, so it only sees CVEs within `limit`.
 - `allLanguages?: boolean` — default `false`. When `false`, each record keeps only its English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description.
 - `limit?: number` — max results (default 20, max 2000)
+- `offset?: number` — zero-based page offset, passed upstream as `startIndex`
 
 Exactly one of `cpeName` or `virtualMatchString` is required.
 
+**Paging.** Despite auditing by CPE, this tool queries `cves/2.0`, whose `resultsPerPage` ceiling is 2,000 — not the 10,000 of the `cpes/2.0` endpoint `nvd_search_cpes` pages. `offset` is independent of that ceiling on both endpoints. Page with `offset` at a modest `limit` rather than raising `limit` to reach further: this tool returns full CVE records, so a large `limit` is a large response, and it also widens what `severityMin` filters in a single pass.
+
 **Output:**
 - `cves: CveRecord[]` — full CVE records (this is a targeted audit, not a search — full detail is appropriate)
-- `queryMeta: { totalResults: number, returned: number, cpeName?: string, virtualMatchString?: string }` — echoes the CPE identifier used so the caller can verify the right product was queried
 
-**Configurations rendering.** `structuredContent` always carries the whole configuration tree. The formatted text renders each CVE's CPE match criteria — the criteria string, its version bounds, whether the CPE is the vulnerable component or only the context it runs in, and the operators combining it — capped at the first 5 per CVE with a `… N more` trailer, matching the cap this formatter already applies to `references`. The cap is what keeps the block bounded: `limit` accepts up to 2000 CVEs, and a single complex CVE can carry dozens of criteria (CVE-2021-44224 has 37 across 7 node groups — 2,727 bytes rendered in full versus 373 capped).
+**Enrichment:**
+- `totalCount: number` — total CVEs matched before pagination
+- `returned: number` — records in this response
+- `offset: number` — page offset used
+- `auditTarget: string` — the `cpeName` or `virtualMatchString` the audit ran against, so the caller can verify the right product was queried
+- `severityMin?: string` — the client-side severity threshold applied; absent when none was set
+- `filteredCount?: number` — CVEs the `severityMin` filter dropped from the page NVD returned. Present whenever `severityMin` is set. This is not `totalCount − returned`: CVEs beyond `limit` were never fetched, so they were never evaluated against the filter
+- `notice?: string` — distinguishes an unknown CPE, a `severityMin` threshold that emptied the page, and an `offset` past the end of the result set
+
+**Configurations rendering.** `structuredContent` always carries the whole configuration tree. The formatted text renders each CVE's CPE match criteria — the criteria string, its version bounds, whether the CPE is the vulnerable component or only the context it runs in, and the operators combining it — capped at the first 5 per CVE with a `… N more` trailer, matching the cap this formatter already applies to `references`. The cap is what keeps the block bounded: `limit` accepts up to 2000 CVEs, and a single complex CVE can carry dozens of criteria (CVE-2021-44224 has 37 across 7 node groups — 2,727 bytes rendered in full versus 373 capped). `nvd_get_cve` renders criteria through the same shared formatter and cap, so the two tools present the affected-product surface identically.
 
 Both operators are rendered because they mean different things: a node's operator combines that node's own matches, while a group's operator combines its sibling nodes — an `AND` there marks conditions that must hold together (a firmware match plus the hardware it runs on), which reads as two unrelated alternatives if dropped.
 
@@ -347,12 +372,20 @@ errors: [
 - `keyword?: string` — product name or vendor keyword (e.g., `"apache http server"`, `"openssl"`)
 - `cpeMatchString?: string` — partial CPEv2.3 pattern (e.g., `"cpe:2.3:a:apache:http_server"`)
 - `limit?: number` — max results (default 20, max 10000)
+- `offset?: number` — zero-based page offset, passed upstream as `startIndex`
 
 At least one of `keyword` or `cpeMatchString` required.
 
+**Paging.** This tool queries `cpes/2.0`, whose `resultsPerPage` ceiling is 10,000 — five times the 2,000 of the `cves/2.0` endpoint `nvd_audit_cpe` pages. Dictionary searches routinely overrun any page (`keyword: "apache"` matches over 21,000 entries), and when the keyword is already the vendor there is nothing to narrow toward, so `offset` — not a more specific keyword — is what reaches the rest.
+
 **Output:**
-- `cpes: CpeRecord[]` — array of `{ cpeName, title, deprecated, deprecatedBy?, lastModified }`
-- `queryMeta: { totalResults: number, returned: number }` — when `totalResults > returned`, narrow the keyword
+- `cpes: CpeRecord[]` — array of `{ cpeName, title?, deprecated, deprecatedBy?, lastModified? }`
+
+**Enrichment:**
+- `totalCount: number` — total matching dictionary entries before the limit
+- `returned: number` — entries in this response
+- `offset: number` — page offset used
+- `notice?: string` — nothing matched, the offset ran past the result set, or entries remain beyond this page (naming the offset that reaches them)
 
 **Errors:**
 ```
@@ -382,8 +415,13 @@ errors: [
 
 **Output:**
 - `cveId: string`
-- `changes: CveChangeEvent[]` — each event: `{ changeDate, details: [{ action, type, oldValue?, newValue? }] }`, ordered to match `order`. Structured upstream values (`Affected` arrays, `SSVC` objects) are JSON-serialized so the values stay flat strings
-- `queryMeta: { totalResults: number, returned: number, offset: number }`
+- `changes: CveChangeEvent[]` — each event: `{ changeDate, eventName?, details: [{ action?, type?, oldValue?, newValue? }] }`, ordered to match `order`. Structured upstream values (`Affected` arrays, `SSVC` objects) are JSON-serialized so the values stay flat strings
+
+**Enrichment:**
+- `totalCount: number` — total change events on record for this CVE
+- `returned: number` — events in this response
+- `offset: number` — page offset used
+- `order: 'oldest' | 'newest'` — which end of the history this page was anchored to, since `offset` counts from that end
 
 **Errors:**
 ```

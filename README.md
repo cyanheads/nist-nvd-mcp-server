@@ -49,8 +49,9 @@ The primary discovery tool for vulnerability surveillance and triage workflows.
 - CISA KEV filter — limit results to known-exploited vulnerabilities
 - Convenience date shorthands: `pubDays` and `lastModDays` for "last N days" queries
 - Explicit ISO 8601 date range parameters (`pubStartDate`/`pubEndDate`, etc.) with 120-day max span
-- Auto-clamps convenience date params that exceed 120 days and reports clamped values in `queryMeta`
+- Auto-clamps convenience date params that exceed 120 days and reports clamped values in the response enrichment
 - Pagination via `limit` (up to 2000) and `offset`
+- Every row carries a truncated description alongside the ID, so results are distinguishable without a follow-up fetch
 - Results are always brief; call `nvd_get_cve` for full detail
 
 ---
@@ -61,9 +62,10 @@ Fetch one or more CVEs by ID with full detail or brief summaries.
 
 - Batch up to 100 CVE IDs per call
 - Full mode: all CVSS scores across v2.0, v3.0, v3.1, and v4.0; CWE weaknesses; CPE configurations; CISA KEV fields; references
-- Brief mode (`brief: true`): ID, status, top severity, KEV name — recommended for batches larger than 10
+- Brief mode (`brief: true`): ID, status, top severity, KEV name, truncated description — recommended for batches larger than 10
 - `includeReferences: false` to strip the references array and reduce response size
-- Per-ID parity check: `queryMeta.missingIds` lists any requested IDs NVD didn't return
+- Per-ID parity check: the `missingIds` enrichment field lists any requested IDs NVD didn't return
+- Rendered text carries the affected-product criteria and references the record holds, capped with a `… N more` trailer; `allLanguages: true` renders every localized description, not just English
 
 ---
 
@@ -73,7 +75,7 @@ Look up product identifiers before auditing.
 
 - Keyword search (e.g., `"apache http server"`, `"openssl"`) or partial CPEv2.3 pattern
 - Returns full CPE name, human-readable title, deprecation status, and superseding CPEs
-- Pagination up to 10,000 entries — narrow the keyword when `totalResults > returned`
+- Pagination via `limit` (up to 10,000 per page) and `offset` — a vendor-level keyword can match tens of thousands of entries, so page with `offset` rather than trying to narrow further
 - Use this before `nvd_audit_cpe` — CPE names are arcane strings; guessing audits the wrong product
 
 ---
@@ -86,7 +88,8 @@ Full CVE audit for a specific product version.
 - Version range via `versionStart`/`versionEnd` with inclusive/exclusive type control
 - Client-side severity filter (`severityMin`) to strip low-signal entries
 - Returns full CVE records (ID, CVSS scores, CWE, CPE configurations, KEV fields, references)
-- Echoes the CPE identifier used in `queryMeta` so callers can verify the correct product was queried
+- Pagination via `limit` (up to 2000) and `offset` — page at a modest `limit` instead of raising it, since each result is a full record
+- Echoes the CPE identifier used in the response enrichment so callers can verify the correct product was queried
 
 ---
 
@@ -128,9 +131,10 @@ NVD-specific:
 
 Agent-friendly output:
 
-- `queryMeta` on every response — total results, returned count, page offset, and any date-clamping events so agents can reason about what was actually queried
+- An `enrichment` block on every response, carried on both `structuredContent` and the rendered text — total results, returned count, page offset, the filters actually applied, and any date-clamping events, so agents can reason about what was really queried
 - `missingIds` in batch CVE lookups — per-ID parity check instead of a silent partial result
 - CPE echo in audit responses — `cpeName` or `virtualMatchString` reflected back so callers can verify the correct product was audited
+- Empty-result notices that name the cause — an unmatched query, a severity threshold that emptied the page, and an offset past the end of the result set are told apart rather than all reading as "nothing found"
 
 ## Getting started
 

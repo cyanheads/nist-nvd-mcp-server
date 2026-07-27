@@ -67,11 +67,14 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       title: z.string().optional().describe('Human-readable title.'),
       deprecated: z.boolean().describe('Whether this CPE is deprecated.'),
     })).describe('Matching CPE dictionary entries.'),
-    queryMeta: z.object({
-      totalResults: z.number().describe('Total matches before limit.'),
-      returned: z.number().describe('Entries returned.'),
-    }).describe('Pagination metadata.'),
   }),
+
+  // Pagination totals are agent-facing context, not domain payload — declare them as
+  // `enrichment` and populate via ctx.enrich so they reach structuredContent AND content[].
+  enrichment: {
+    totalCount: z.number().describe('Total matches before the limit was applied.'),
+    returned: z.number().describe('Entries returned.'),
+  },
 
   errors: [
     {
@@ -91,7 +94,9 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     ctx.log.info('Searching CPE dictionary', { keyword: input.keyword, limit: input.limit });
     const service = getNvdCpeService();
     const result = await service.searchCpes({ keyword: input.keyword, cpeMatchString: input.cpeMatchString, limit: input.limit }, ctx);
-    return { cpes: result.cpes, queryMeta: { totalResults: result.totalResults, returned: result.returned } };
+    ctx.enrich({ returned: result.returned });
+    ctx.enrich.total(result.totalResults);
+    return { cpes: result.cpes };
   },
 
   format: (result) => [{ type: 'text', text: result.cpes.map(c => `**${c.title ?? c.cpeName}**: \`${c.cpeName}\``).join('\n') }],
