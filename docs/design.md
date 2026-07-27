@@ -10,7 +10,7 @@
 | `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (InvalidParams), `date_range_exceeds_max` (InvalidParams), `rate_limited` (RateLimited) |
 | `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (RateLimited) |
 | `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (RateLimited) |
-| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
+| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit`, `offset`, `order` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `rate_limited` (RateLimited) |
 
 ### Resources
 
@@ -377,11 +377,12 @@ errors: [
 **Input:**
 - `cveId: string` — e.g., `"CVE-2021-44228"`
 - `limit?: number` — max change events returned (default 20, max 2000)
-- `offset?: number` — zero-based offset for pagination
+- `offset?: number` — zero-based offset for pagination, counted from the end `order` anchors to
+- `order?: 'oldest' | 'newest'` — which end to page from (default `newest`). NVD serves history oldest-first, so `oldest` maps `offset` straight to `startIndex` in one request; `newest` reverses it, adding a second tail-anchored request only when the history is longer than `limit`
 
 **Output:**
 - `cveId: string`
-- `changes: CveChangeEvent[]` — each event: `{ changeDate, details: [{ action, type, oldValue?, newValue? }] }`
+- `changes: CveChangeEvent[]` — each event: `{ changeDate, details: [{ action, type, oldValue?, newValue? }] }`, ordered to match `order`. Structured upstream values (`Affected` arrays, `SSVC` objects) are JSON-serialized so the values stay flat strings
 - `queryMeta: { totalResults: number, returned: number, offset: number }`
 
 **Errors:**
@@ -389,9 +390,6 @@ errors: [
 errors: [
   { reason: 'invalid_cve_id_format', code: 'InvalidParams',
     when: 'CVE ID fails format validation (NVD returns HTTP 404 for malformed IDs).',
-    retryable: false },
-  { reason: 'cve_not_found', code: 'NotFound',
-    when: 'Valid-format CVE ID returns empty cveChanges array — CVE exists in NVD but has no recorded history events, or the ID does not exist.',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',

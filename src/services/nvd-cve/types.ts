@@ -80,11 +80,15 @@ export interface RawCveHistoryResponse {
       cveChangeId?: string;
       sourceIdentifier?: string;
       created?: string;
+      /**
+       * `oldValue`/`newValue` are usually strings, but NVD emits an array for `Affected` details
+       * and an object for `SSVC` details — normalization serializes those to JSON.
+       */
       details?: Array<{
         action?: string;
         type?: string;
-        oldValue?: string;
-        newValue?: string;
+        oldValue?: unknown;
+        newValue?: unknown;
       }>;
     };
   }>;
@@ -172,6 +176,7 @@ export interface BriefCveRecord {
 /** CVE change event from the history API. */
 export interface CveChangeEvent {
   changeDate: string;
+  /** Values are always flat strings — structured upstream values arrive JSON-serialized. */
   details: Array<{
     action?: string;
     type?: string;

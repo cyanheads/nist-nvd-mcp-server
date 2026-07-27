@@ -72,22 +72,46 @@ describe('nvdCveResource', () => {
   });
 
   it('throws validationError for an invalid CVE ID format', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: 'INVALID-ID' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
   it('throws validationError for a malformed CVE ID (no year)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: 'CVE-12345' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
+  // Issue #33: a resource read of a malformed URI surfaced neither reason nor recovery hint.
+  it('carries reason and recovery hint on an invalid CVE ID format', async () => {
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
+    const params = nvdCveResource.params.parse({ cveId: 'INVALID-ID' });
+    await expect(nvdCveResource.handler(params, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_cve_id_format',
+        recovery: { hint: expect.stringContaining('nvd://cve/') },
+      },
+    });
+  });
+
   it('throws notFound when NVD returns no records for a valid ID', async () => {
     mockService.fetchById.mockResolvedValue({ cves: [], returned: 0, requested: 1 });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: 'CVE-9999-99999' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/not found/i);
+  });
+
+  it('carries reason and an nvd_search_cves recovery hint when the CVE is absent', async () => {
+    mockService.fetchById.mockResolvedValue({ cves: [], returned: 0, requested: 1 });
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
+    const params = nvdCveResource.params.parse({ cveId: 'CVE-9999-99999' });
+    await expect(nvdCveResource.handler(params, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'cve_not_found',
+        recovery: { hint: expect.stringContaining('nvd_search_cves') },
+      },
+    });
   });
 
   it('propagates service errors (e.g. rate_limited)', async () => {
