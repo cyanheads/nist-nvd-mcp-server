@@ -6,7 +6,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
-import { briefDescription, getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
+import { UnfilteredBriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
+import { getNvdCveService, toBriefCve } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
 
 /**
@@ -59,23 +60,24 @@ export const nvdGetCve = tool('nvd_get_cve', {
       ),
   }),
 
-  // Use passthrough to avoid aspirational over-typing of the upstream CVE schema.
-  // structuredContent will carry the full typed data; format() renders what matters.
+  /**
+   * The brief row is declared in full — it is this server's own shape, shared with nvd_search_cves.
+   * Full records are the same fields plus the upstream detail, so the item stays loose rather
+   * than aspirationally re-typing NVD's schema.
+   */
   output: z.object({
     brief: z.boolean().describe('Whether brief or full records were returned.'),
     cves: z
       .array(
-        z
-          .object({})
-          .passthrough()
-          .describe(
-            'One CVE record. Full mode includes CVSS scores, configurations, weaknesses, and references. ' +
-              'Brief mode includes ID, status, top severity, and CISA KEV name.',
-          ),
+        UnfilteredBriefCveRecordSchema.loose().describe(
+          'One CVE record. Brief mode carries exactly these fields. ' +
+            'Full mode adds CVSS scores across every version, descriptions by language, ' +
+            'configurations, weaknesses, references, and the full CISA KEV block.',
+        ),
       )
       .describe(
         'CVE records. In full mode: complete records with CVSS scores, configurations, weaknesses, and references. ' +
-          'In brief mode: trimmed records with ID, status, top severity, and CISA KEV name.',
+          'In brief mode: trimmed records with ID, status, top severity, truncated description, and CISA KEV name.',
       ),
   }),
 
@@ -137,26 +139,14 @@ export const nvdGetCve = tool('nvd_get_cve', {
     });
 
     if (input.brief) {
-      return {
-        brief: true,
-        cves: result.cves.map((cve) => {
-          const description = briefDescription(cve.descriptions);
-          return {
-            cveId: cve.cveId,
-            vulnStatus: cve.vulnStatus,
-            published: cve.published,
-            ...(description && { description }),
-            ...(cve.severity && { severity: cve.severity }),
-            ...(cve.cisaKev && { cisaVulnerabilityName: cve.cisaKev.vulnerabilityName }),
-          };
-        }) as Record<string, unknown>[],
-      };
+      /**
+       * No severity filter exists on this tool, so `toBriefCve` is called without a filter version
+       * and the rows never carry `filteredSeverity` — matching the schema declared above.
+       */
+      return { brief: true, cves: result.cves.map((cve) => toBriefCve(cve)) };
     }
 
-    return {
-      brief: false,
-      cves: result.cves as unknown as Record<string, unknown>[],
-    };
+    return { brief: false, cves: result.cves };
   },
 
   format: (result) => {

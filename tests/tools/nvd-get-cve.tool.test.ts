@@ -9,8 +9,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdGetCve, REFERENCE_CAP } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
 import { CPE_MATCH_CAP } from '@/mcp-server/tools/formatting/cpe-match.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
-import { BRIEF_DESCRIPTION_CHARS } from '@/services/nvd-cve/nvd-cve-service.js';
-import type { CveRecord } from '@/services/nvd-cve/types.js';
+import { BRIEF_DESCRIPTION_CHARS, NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
+import type { CveRecord, RawCveItem, RawCveResponse } from '@/services/nvd-cve/types.js';
+import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -471,5 +472,197 @@ describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
     expect(text).toContain('CVE-2022-00001');
     expect(text).not.toContain('undefined');
     expect(text).not.toMatch(/\[\w*\]\s*$/m);
+  });
+});
+
+/**
+ * Issue #35: brief mode rebuilt the brief-row shape inline instead of calling `toBriefCve`, so the
+ * two surfaces could drift apart silently. Both now run the same upstream payload through the same
+ * builder — assert row-for-row equality across the shapes that differ from one another.
+ */
+describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () => {
+  /** In the KEV catalog, with an English description. */
+  const RAW_KEV: RawCveItem = {
+    id: 'CVE-2021-44228',
+    vulnStatus: 'Analyzed',
+    published: '2021-12-10T10:15:00.000',
+    lastModified: '2023-11-06T03:18:00.000',
+    descriptions: [{ lang: 'en', value: 'Apache Log4j2 JNDI vulnerability.' }],
+    metrics: {
+      cvssMetricV31: [
+        {
+          type: 'Primary',
+          cvssData: { version: '3.1', baseScore: 10.0, baseSeverity: 'CRITICAL' },
+        },
+      ],
+    },
+    cisaExploitAdd: '2021-12-10',
+    cisaActionDue: '2021-12-24',
+    cisaRequiredAction: 'Apply updates per vendor instructions.',
+    cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
+  };
+
+  /** Not in the KEV catalog. */
+  const RAW_NO_KEV: RawCveItem = {
+    id: 'CVE-2023-11111',
+    vulnStatus: 'Analyzed',
+    published: '2023-02-01T00:00:00.000',
+    lastModified: '2023-03-01T00:00:00.000',
+    descriptions: [{ lang: 'en', value: 'Buffer overflow in mod_lua.' }],
+    metrics: {
+      cvssMetricV31: [
+        { type: 'Primary', cvssData: { version: '3.1', baseScore: 7.5, baseSeverity: 'HIGH' } },
+      ],
+    },
+  };
+
+  /** In the KEV catalog but carrying no description at all. */
+  const RAW_KEV_NO_DESCRIPTION: RawCveItem = {
+    ...RAW_KEV,
+    id: 'CVE-2024-22222',
+    descriptions: [],
+  };
+
+  /** No description, no CVSS scores, no KEV — every optional brief field absent. */
+  const RAW_BARE: RawCveItem = {
+    id: 'CVE-2022-00001',
+    vulnStatus: 'Awaiting Analysis',
+    published: '2022-01-01T00:00:00.000',
+    lastModified: '2022-01-02T00:00:00.000',
+  };
+
+  /** Longer than the snippet budget — proves both surfaces truncate at the same point. */
+  const RAW_LONG_DESCRIPTION: RawCveItem = {
+    ...RAW_NO_KEV,
+    id: 'CVE-2025-33333',
+    descriptions: [{ lang: 'en', value: `${'A'.repeat(400)}END` }],
+  };
+
+  /** No English entry — both surfaces must fall back to the same prose. */
+  const RAW_NON_ENGLISH: RawCveItem = {
+    ...RAW_NO_KEV,
+    id: 'CVE-2025-44444',
+    descriptions: [{ lang: 'es', value: 'Vulnerabilidad JNDI en Apache Log4j2.' }],
+  };
+
+  /** Shellshock shape: the v2 headline (HIGH 10.0) outranks the v3.1 score (CRITICAL 9.8). */
+  const RAW_DIVERGENT: RawCveItem = {
+    id: 'CVE-2014-6271',
+    vulnStatus: 'Analyzed',
+    published: '2014-09-24T00:00:00.000',
+    lastModified: '2021-11-01T00:00:00.000',
+    descriptions: [{ lang: 'en', value: 'Shellshock.' }],
+    metrics: {
+      cvssMetricV2: [{ type: 'Primary', cvssData: { version: '2.0', baseScore: 10.0 } }],
+      cvssMetricV31: [
+        { type: 'Primary', cvssData: { version: '3.1', baseScore: 9.8, baseSeverity: 'CRITICAL' } },
+      ],
+    },
+  };
+
+  const RAW_ITEMS = [
+    RAW_KEV,
+    RAW_NO_KEV,
+    RAW_KEV_NO_DESCRIPTION,
+    RAW_BARE,
+    RAW_LONG_DESCRIPTION,
+    RAW_NON_ENGLISH,
+    RAW_DIVERGENT,
+  ];
+
+  const RESPONSE: RawCveResponse = {
+    totalResults: RAW_ITEMS.length,
+    vulnerabilities: RAW_ITEMS.map((cve) => ({ cve })),
+  };
+
+  const mockClient = { get: vi.fn() };
+  const service = new NvdCveService({} as never, {} as never);
+
+  beforeEach(() => {
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      mockClient as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(service);
+    mockClient.get.mockReset();
+    mockClient.get.mockResolvedValue(RESPONSE);
+  });
+
+  /** Brief rows from the nvd_get_cve surface for the whole fixture set. */
+  async function briefRows() {
+    const input = nvdGetCve.input.parse({
+      cveIds: RAW_ITEMS.map((i) => i.id as string),
+      brief: true,
+    });
+    const result = await nvdGetCve.handler(input, createMockContext());
+    return result.cves;
+  }
+
+  it('emits rows identical to the search surface for the same upstream payload', async () => {
+    const searched = await service.searchCves({ keyword: 'anything' }, createMockContext());
+    const fetched = await briefRows();
+
+    expect(fetched).toEqual(searched.cves);
+    expect(fetched).toHaveLength(RAW_ITEMS.length);
+  });
+
+  it('carries the KEV name on a KEV record and omits the field entirely otherwise', async () => {
+    const [kev, noKev] = await briefRows();
+
+    expect(kev).toHaveProperty(
+      'cisaVulnerabilityName',
+      'Apache Log4j2 Remote Code Execution Vulnerability',
+    );
+    expect(noKev).not.toHaveProperty('cisaVulnerabilityName');
+  });
+
+  it('omits description on records that carry none and keeps every other field', async () => {
+    const rows = await briefRows();
+    const kevNoDescription = rows[2];
+    const bare = rows[3];
+
+    expect(kevNoDescription).not.toHaveProperty('description');
+    expect(kevNoDescription).toHaveProperty('cveId', 'CVE-2024-22222');
+    expect(kevNoDescription).toHaveProperty('severity');
+
+    expect(bare).toEqual({
+      cveId: 'CVE-2022-00001',
+      vulnStatus: 'Awaiting Analysis',
+      published: '2022-01-01T00:00:00.000',
+    });
+  });
+
+  it('truncates and falls back to non-English prose the same way on both surfaces', async () => {
+    const rows = await briefRows();
+
+    expect(rows[4]).toHaveProperty('description', `${'A'.repeat(BRIEF_DESCRIPTION_CHARS)}…`);
+    expect(rows[5]).toHaveProperty('description', 'Vulnerabilidad JNDI en Apache Log4j2.');
+  });
+
+  /**
+   * The only field toBriefCve adds beyond the brief row is gated on a severity filter, which
+   * nvd_get_cve has no input for — a row growing one here would be an output change, not a
+   * consolidation.
+   */
+  it('never emits filteredSeverity, even on a record whose CVSS versions diverge', async () => {
+    const rows = await briefRows();
+
+    expect(rows[6]).toHaveProperty('cveId', 'CVE-2014-6271');
+    expect(rows[6]).toHaveProperty('severity', { label: 'HIGH', score: 10.0, fromVersion: '2.0' });
+    expect(rows[6]).not.toHaveProperty('filteredSeverity');
+    expect(rows.some((r) => 'filteredSeverity' in r)).toBe(false);
+  });
+
+  it('leaves the search surface free to add filteredSeverity when a filter diverges', async () => {
+    const searched = await service.searchCves(
+      { severityParam: 'CRITICAL', severityVersion: 'v3' },
+      createMockContext(),
+    );
+
+    // Same record, same builder — only the filter version the search surface passes differs.
+    expect(searched.cves[6].filteredSeverity).toEqual({
+      label: 'CRITICAL',
+      score: 9.8,
+      fromVersion: '3.1',
+    });
   });
 });

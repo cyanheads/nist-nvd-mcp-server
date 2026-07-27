@@ -129,8 +129,14 @@ export interface CisaKev {
   vulnerabilityName: string;
 }
 
-/** Full CVE record (normalized from raw API response). */
-export interface CveRecord {
+/**
+ * Full CVE record (normalized from raw API response).
+ *
+ * Declared as a type alias, not an interface: both record shapes are returned straight from tool
+ * handlers whose output schemas allow unknown extra keys, and only an alias carries the implicit
+ * index signature that assignment needs — an interface would force a cast and lose the field check.
+ */
+export type CveRecord = {
   cisaKev?: CisaKev;
   configurations: Array<{
     /** Combines this group's sibling nodes — an `AND` means every node must match. */
@@ -157,10 +163,10 @@ export interface CveRecord {
   severity?: TopSeverity;
   vulnStatus: string;
   weaknesses: Array<{ source: string; cweIds: string[] }>;
-}
+};
 
-/** Brief CVE record for search results and bulk lookups. */
-export interface BriefCveRecord {
+/** Brief CVE record for search results and bulk lookups. See `CveRecord` on the alias form. */
+export type BriefCveRecord = {
   cisaVulnerabilityName?: string;
   cveId: string;
   /**
@@ -176,7 +182,7 @@ export interface BriefCveRecord {
   published: string;
   severity?: TopSeverity;
   vulnStatus: string;
-}
+};
 
 /** CVE change event from the history API. */
 export interface CveChangeEvent {
