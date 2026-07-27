@@ -354,6 +354,18 @@ describe('nvdSearchCves', () => {
     expect(nvdSearchCves.description).not.toContain('most recently modified');
   });
 
+  // Issue #28: severity is an exact-band NVD filter, never a floor — neither surface may imply one.
+  it('severity descriptions do not promise a floor', () => {
+    const severityInput = nvdSearchCves.input.shape.severity.description ?? '';
+    expect(severityInput).not.toContain('or above');
+    expect(severityInput).toContain('exactly this CVSS severity band');
+
+    const echoed =
+      nvdSearchCves.enrichment.filtersApplied.unwrap().shape.severity.description ?? '';
+    expect(echoed).not.toContain('floor');
+    expect(echoed).toContain('exact');
+  });
+
   // Issue #24: the per-row filtered-version severity passes through and renders.
   it('passes filteredSeverity through from the service to output', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult([BRIEF_CVE_DIVERGENT]));

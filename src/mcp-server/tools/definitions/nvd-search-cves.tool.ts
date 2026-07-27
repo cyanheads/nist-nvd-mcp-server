@@ -67,7 +67,10 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     severity: z
       .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
       .optional()
-      .describe('Filter to CVEs at this CVSS severity level or above.'),
+      .describe(
+        'Filter to CVEs in exactly this CVSS severity band — NVD matches the one band, not a floor. ' +
+          'Covering several bands (e.g. HIGH and CRITICAL) takes one call per band.',
+      ),
     severityVersion: z
       .enum(['v2', 'v3', 'v4'])
       .default('v3')
@@ -167,7 +170,13 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     filtersApplied: z
       .object({
         keyword: z.string().optional().describe('The keyword filter that was applied.'),
-        severity: z.string().optional().describe('The severity floor that was applied.'),
+        severity: z
+          .string()
+          .optional()
+          .describe(
+            'The exact CVSS severity band that was applied — results are limited to this band alone, ' +
+              'so higher bands are not included.',
+          ),
         severityVersion: z
           .string()
           .optional()
