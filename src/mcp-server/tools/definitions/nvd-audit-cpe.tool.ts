@@ -221,7 +221,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       .string()
       .optional()
       .describe(
-        'Guidance on the shape of this page. When no CVEs came back it distinguishes an unknown CPE from a severityMin filter that dropped everything on the page, from an offset past the result set, from an empty page NVD returned inside a range it says has matches. On a partial page it names the offset that reaches the next one.',
+        'Guidance on the shape of this page. When no CVEs came back it distinguishes a target NVD holds no CVEs for from a severityMin filter that dropped everything on the page, from an offset past the result set, from an empty page NVD returned inside a range it says has matches. On a partial page it names the offset that reaches the next one.',
       ),
   },
 
@@ -260,13 +260,6 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       when: 'cpeName or virtualMatchString does not start with "cpe:2.3:" — not a valid CPEv2.3 string.',
       recovery:
         'Provide a valid CPEv2.3 string starting with "cpe:2.3:". Use nvd_search_cpes to find the correct CPE name.',
-    },
-    {
-      reason: 'cpe_not_found',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'NVD itself returned zero results (totalResults === 0) for the given cpeName — the CPE is likely misspelled or absent from NVD.',
-      recovery:
-        'Use nvd_search_cpes to verify the exact CPE name exists in the NVD dictionary before auditing.',
     },
     {
       reason: 'rate_limited',
@@ -358,8 +351,8 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
        * the product has CVEs and this page merely sits past them. filteredCount > 0 means NVD did
        * return CVEs and severityMin cut them. A valid offset inside a non-zero totalCount means
        * NVD contradicted its own count, so neither the offset nor the target is at fault. Only a
-       * zero count warrants re-checking the target — every earlier branch exists to keep the
-       * caller from being sent after a mistake they did not make.
+       * zero count leaves the CPE string itself unconfirmed, and even then the finding leads —
+       * every branch exists to keep the caller from being sent after a mistake they did not make.
        */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
         ctx.enrich.notice(
@@ -376,7 +369,8 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         );
       } else {
         ctx.enrich.notice(
-          'NVD returned no CVEs for this audit target. Verify it exists in the CPE dictionary with nvd_search_cpes.',
+          'No CVEs in NVD for this audit target — a clean audit, not a failed one. ' +
+            'If that is unexpected, confirm the CPE string with nvd_search_cpes: it is the one input this audit cannot verify on its own.',
         );
       }
     } else if (result.totalResults > result.offset + result.returned + result.filteredCount) {

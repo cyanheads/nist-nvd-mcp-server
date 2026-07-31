@@ -553,7 +553,10 @@ describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () =
     lastModified: '2021-11-01T00:00:00.000',
     descriptions: [{ lang: 'en', value: 'Shellshock.' }],
     metrics: {
-      cvssMetricV2: [{ type: 'Primary', cvssData: { version: '2.0', baseScore: 10.0 } }],
+      // NVD puts a v2 metric's baseSeverity beside cvssData, not inside it.
+      cvssMetricV2: [
+        { type: 'Primary', baseSeverity: 'HIGH', cvssData: { version: '2.0', baseScore: 10.0 } },
+      ],
       cvssMetricV31: [
         { type: 'Primary', cvssData: { version: '3.1', baseScore: 9.8, baseSeverity: 'CRITICAL' } },
       ],

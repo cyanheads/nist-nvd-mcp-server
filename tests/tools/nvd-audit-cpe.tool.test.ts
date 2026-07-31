@@ -217,17 +217,9 @@ describe('nvdAuditCpe', () => {
     });
   });
 
-  it('propagates cpe_not_found from service', async () => {
-    mockService.auditCpe.mockRejectedValue(
-      Object.assign(new Error('No CVEs found for CPE'), {
-        data: { reason: 'cpe_not_found' },
-      }),
-    );
-    const ctx = createMockContext();
-    const input = nvdAuditCpe.input.parse({
-      cpeName: 'cpe:2.3:a:nonexistent:product:9.9:*:*:*:*:*:*:*',
-    });
-    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toThrow('No CVEs found for CPE');
+  // Issue #40: no CVEs for a cpeName is a clean audit result, so nothing is declared for it.
+  it('declares no cpe_not_found failure mode', () => {
+    expect(nvdAuditCpe.errors?.map((e) => e.reason)).not.toContain('cpe_not_found');
   });
 
   it('handles sparse CVE without severity or references', async () => {
@@ -555,26 +547,30 @@ describe('nvdAuditCpe — empty-page notices (issue #34)', () => {
     mockService.auditCpe.mockReset();
   });
 
-  /**
-   * Notice raised for an empty page. `virtualMatchString` is the audit target throughout: with a
-   * `cpeName`, the service throws `cpe_not_found` before a zero-total page can reach the handler.
-   */
+  /** Notice raised for an empty page, on either input arm — both reach the handler alike (#40). */
   async function noticeFor(
     offset: number,
     totalResults: number,
-    extra: { severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; filteredCount?: number } = {},
+    extra: {
+      severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+      filteredCount?: number;
+      cpeName?: string;
+    } = {},
   ): Promise<string | undefined> {
+    const target = extra.cpeName
+      ? { cpeName: extra.cpeName }
+      : { virtualMatchString: 'cpe:2.3:a:apache:log4j:*' };
     mockService.auditCpe.mockResolvedValue({
       cves: [],
       totalResults,
       returned: 0,
       offset,
       filteredCount: extra.filteredCount ?? 0,
-      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+      ...target,
     });
     const ctx = createMockContext();
     const input = nvdAuditCpe.input.parse({
-      virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
+      ...target,
       offset,
       ...(extra.severityMin && { severityMin: extra.severityMin }),
     });
@@ -608,12 +604,28 @@ describe('nvdAuditCpe — empty-page notices (issue #34)', () => {
     expect(notice).toContain('Retry the query');
   });
 
-  it('reports a genuinely unmatched audit target rather than any paging notice', async () => {
+  /**
+   * A zero-CVE target is the audit's finding. The notice leads with that and keeps the
+   * unconfirmed CPE string as the caveat, rather than opening on a diagnosis of the input (#40).
+   */
+  it('leads with the clean-audit finding and keeps the CPE caveat second', async () => {
     const notice = await noticeFor(0, 0);
 
-    expect(notice).toContain('nvd_search_cpes');
+    expect(notice).toContain('a clean audit, not a failed one');
+    expect(notice?.indexOf('No CVEs in NVD')).toBeLessThan(
+      notice?.indexOf('nvd_search_cpes') ?? -1,
+    );
     expect(notice).not.toContain('past the end');
     expect(notice).not.toContain('Retry the query');
+  });
+
+  // Issue #40: the cpeName arm used to fail before this notice could be reached.
+  it('gives a cpeName with no CVEs the same empty-page notice as a virtualMatchString', async () => {
+    const viaCpeName = await noticeFor(0, 0, {
+      cpeName: 'cpe:2.3:a:gnu:gnubiff:-:*:*:*:*:*:*:*',
+    });
+
+    expect(viaCpeName).toBe(await noticeFor(0, 0));
   });
 
   it('keeps the severity-drop notice ahead of the contradicted-count notice', async () => {
@@ -766,7 +778,7 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
     pastEnd: 'past the end',
     severityDrop: 'scored below',
     contradictedCount: 'Retry the query',
-    genuineZero: 'Verify it exists in the CPE dictionary',
+    genuineZero: 'a clean audit, not a failed one',
     partialPage: 'Results truncated',
   } as const;
 

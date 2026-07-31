@@ -6,11 +6,11 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `nvd_get_cve` | Fetch one or more CVEs by ID. Returns full details: CVSS scores (all available versions), CWE weaknesses, affected CPE configurations, CISA KEV fields, and references. Up to 100 IDs per call; use `brief` mode for bulk lookups to control output size. | `cveIds` (up to 100), `brief`, `includeReferences`, `allLanguages` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
-| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (InvalidParams), `date_range_exceeds_max` (InvalidParams), `rate_limited` (RateLimited) |
-| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit`, `offset` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (InvalidParams), `conflicting_cpe_inputs` (InvalidParams), `version_range_without_match_string` (InvalidParams), `cpe_not_found` (NotFound), `rate_limited` (RateLimited) |
-| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (InvalidParams), `rate_limited` (RateLimited) |
-| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit`, `offset`, `order` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (InvalidParams), `rate_limited` (RateLimited) |
+| `nvd_get_cve` | Fetch one or more CVEs by ID. Returns full details: CVSS scores (all available versions), CWE weaknesses, affected CPE configurations, CISA KEV fields, and references. Up to 100 IDs per call; use `brief` mode for bulk lookups to control output size. | `cveIds` (up to 100), `brief`, `includeReferences`, `allLanguages` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (ValidationError), `cve_not_found` (NotFound), `rate_limited` (RateLimited) |
+| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or KEV status. The primary discovery tool for surveillance and triage workflows. `pubDays`/`lastModDays` are translated to API date pairs; values over 120 are clamped and flagged in the response. | `keyword`, `exactPhrase`, `severity`, `cweId`, `pubDays`, `lastModDays`, `kevOnly`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `mutually_exclusive_params` (ValidationError), `date_range_exceeds_max` (ValidationError), `rate_limited` (RateLimited) |
+| `nvd_audit_cpe` | Find CVEs affecting a specific product and version. Requires a full CPE name (`cpeName`) or a partial match string (`virtualMatchString`) with optional version range bounds. Use `nvd_search_cpes` first to resolve the correct CPE name when it is not known. | `cpeName` OR `virtualMatchString` + `versionStart`/`versionEnd`, `severityMin`, `allLanguages`, `limit`, `offset` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `missing_cpe_input` (ValidationError), `conflicting_cpe_inputs` (ValidationError), `version_range_without_match_string` (ValidationError), `invalid_cpe_format` (ValidationError), `rate_limited` (RateLimited) |
+| `nvd_search_cpes` | Search the CPE dictionary by keyword or match string. Used to discover the correct CPE name for a product before calling `nvd_audit_cpe`. Returns cpeName, title, deprecation status. | `keyword`, `cpeMatchString`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: false` | `missing_search_input` (ValidationError), `invalid_cpe_format` (ValidationError), `rate_limited` (RateLimited) |
+| `nvd_get_cve_history` | Retrieve the change log for a CVE — score revisions, added references, status transitions. Useful for tracking when a CVE was re-scored or escalated. | `cveId`, `limit`, `offset`, `order` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` | `invalid_cve_id_format` (ValidationError), `rate_limited` (RateLimited) |
 
 ### Resources
 
@@ -137,6 +137,16 @@ The NVD API's `cvssV3Severity` and `cvssV4Severity` filters are mutually exclusi
 
 CVEs can have scores from v2.0, v3.0, v3.1, and v4.0 — sometimes multiple entries per version (primary source = NVD, secondary = CNA). The output surfaces all scores in a `cvssScores` array keyed by version and source type. A top-level `severity` field reflects the highest available score's severity label with a note on which version it came from. This prevents silent data loss for older CVEs that only have v2.0 scores.
 
+Two properties of the upstream shape drive the extraction. **`baseSeverity` sits at different depths per version:** `cvssMetricV2` carries it as a sibling of `cvssData`, `cvssMetricV30`/`V31`/`V40` carry it inside `cvssData`, and no metric carries it at both. Both paths are read, and NVD's own label always wins; the score-range derivation is the fallback for a v2 metric that carries no label at either depth. **A base score of `0.0` is a real score,** not an absent one — NVD scores informational findings that way and pairs them with a full vector string, so entries are kept unless `baseScore` is genuinely undefined.
+
+The derivation follows NVD's published v2.0 bands — `0.0–3.9` LOW, `4.0–6.9` MEDIUM, `7.0–10.0` HIGH — rather than adding a `NONE` tier at `0.0`. CVSS v2 defines no such tier and NVD labels every `0.0` v2 metric LOW; a label outside LOW/MEDIUM/HIGH/CRITICAL is also one the `severityMin` ordering cannot rank, so any threshold would drop it — the same data loss keeping `0.0` exists to prevent.
+
+### An audit that finds nothing is a result, not an error
+
+`nvd_audit_cpe` returns an empty page with `totalCount: 0` when NVD holds no CVEs for the target, on both input arms. A product with a clean record and a mistyped CPE are indistinguishable from `totalResults: 0` alone, so raising `cpe_not_found` asserted the wrong one — and did so right after `nvd_search_cpes` had resolved the exact name the audit was handed. Telling a caller its CPE may not exist is the more expensive mistake: *this version has no known CVEs* is the answer a vulnerability audit exists to give.
+
+Confirming the name against `cpes/2.0` first would keep an accurate error, at the cost of a second upstream request against a 5 req/30s keyless budget. The empty-success path carries the caveat in the notice instead — it names the CPE string as the one thing still unconfirmed, without spending a request to say so.
+
 ### History tool is separate, not an option on nvd_get_cve
 
 CVE history is a distinct endpoint (`/cvehistory/2.0`) returning a different response shape (`cveChanges` array with `details` per event). It's a deliberate separate tool rather than an `includeHistory` flag on `nvd_get_cve` because: (a) it significantly increases payload size and latency for every single CVE lookup, (b) agents only need it for specific investigative workflows ("when was this CVE re-scored?"), not routine lookups.
@@ -169,6 +179,8 @@ The NVD enforces sliding window rate limits (5 or 50 requests per 30-second wind
 **Deterministic rejections are never retried.** NVD answers a 404 with an empty body and its diagnosis in a `message` response header. The client throws it as an `McpError` carrying `data.retryable === false` (the framework's opt-out) so `withRetry` fails fast instead of re-sending a request that cannot succeed. Callers key off that error shape via `isNvdRequestRejected()` rather than matching the message text.
 
 That 404 covers two unrelated faults, and only the `message` header separates them: a rejected parameter (`Invalid cveId parameter.`, `Invalid cpeName parameter, see documentation.`) versus a refused API key (`Invalid apiKey.`). The client splits them — a refused key raises `ConfigurationError` / `nvd_invalid_api_key` naming `NVD_API_KEY`, everything else raises `ValidationError` / `nvd_request_rejected` carrying NVD's own wording. Collapsing the two would tell a caller its CVE ID is malformed when the ID is fine and the key is the fault, sending it to correct something that can never succeed.
+
+`nvd_invalid_api_key` is a transport-layer fault rather than a property of any one tool: every tool surfaces it, none can act on it, and the fix is always the `NVD_API_KEY` value. It therefore appears in no per-tool `errors:` contract — the recovery hint the client attaches carries the whole remedy.
 
 ---
 
@@ -241,7 +253,7 @@ Present only when the CVE appears in the CISA KEV catalog:
 **Errors:**
 ```
 errors: [
-  { reason: 'invalid_cve_id_format', code: 'InvalidParams',
+  { reason: 'invalid_cve_id_format', code: 'ValidationError',
     when: 'One or more CVE IDs fail format validation (NVD returns HTTP 404 with empty body for malformed IDs). Message names the offending IDs.',
     retryable: false },
   { reason: 'cve_not_found', code: 'NotFound',
@@ -263,6 +275,7 @@ errors: [
 
 **Input:**
 - `keyword?: string` — full-text search across CVE descriptions (AND-semantics across words)
+- `exactPhrase?: boolean` — default `false`. When `true`, `keyword` matches as a phrase instead of ANDing its words independently, forwarded as the valueless `keywordExactMatch` flag. Requires `keyword`; without one it raises `exact_phrase_without_keyword` rather than running the search unmodified.
 - `severity?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — CVSS severity filter; applies to v3.1 by default
 - `severityVersion?: 'v2' | 'v3' | 'v4'` — CVSS version for severity filter (default `v3`)
 - `cweId?: string` — e.g., `"CWE-79"`, `"NVD-CWE-Other"`
@@ -283,16 +296,19 @@ errors: [
 - `returned: number` — CVEs in this response
 - `offset: number` — page offset used
 - `datesClamped?: { param, original, clamped }[]` — present when a `pubDays`/`lastModDays` value was reduced to 120
-- `filtersApplied?: { keyword?, severity?, severityVersion?, cweId?, kevOnly?, noRejected? }` — only the non-default filters the query actually applied, so an empty or unexpectedly narrow result set is accountable; absent when the query ran unfiltered
+- `filtersApplied?: { keyword?, exactPhrase?, severity?, severityVersion?, cweId?, kevOnly?, noRejected? }` — only the non-default filters the query actually applied, so an empty or unexpectedly narrow result set is accountable; absent when the query ran unfiltered
 - `notice?: string` — guidance when nothing matched or the offset ran past the result set
 
 **Errors:**
 ```
 errors: [
-  { reason: 'mutually_exclusive_params', code: 'InvalidParams',
+  { reason: 'exact_phrase_without_keyword', code: 'ValidationError',
+    when: 'exactPhrase set without a keyword — it selects how keyword matches and has nothing to modify alone.',
+    retryable: false },
+  { reason: 'mutually_exclusive_params', code: 'ValidationError',
     when: 'Both pubDays and pubStartDate/pubEndDate provided, or both lastModDays and lastModStartDate/lastModEndDate.',
     retryable: false },
-  { reason: 'date_range_exceeds_max', code: 'InvalidParams',
+  { reason: 'date_range_exceeds_max', code: 'ValidationError',
     when: 'Raw pubStartDate/pubEndDate or lastModStartDate/lastModEndDate span more than 120 days. (pubDays/lastModDays over 120 are auto-clamped, not an error.)',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
@@ -333,7 +349,7 @@ Exactly one of `cpeName` or `virtualMatchString` is required.
 - `auditTarget: string` — the `cpeName` or `virtualMatchString` the audit ran against, so the caller can verify the right product was queried
 - `severityMin?: string` — the client-side severity threshold applied; absent when none was set
 - `filteredCount?: number` — CVEs the `severityMin` filter dropped from the page NVD returned. Present whenever `severityMin` is set. This is not `totalCount − returned`: CVEs beyond `limit` were never fetched, so they were never evaluated against the filter
-- `notice?: string` — distinguishes an unknown CPE, a `severityMin` threshold that emptied the page, and an `offset` past the end of the result set
+- `notice?: string` — distinguishes a target NVD holds no CVEs for, a `severityMin` threshold that emptied the page, and an `offset` past the end of the result set
 
 **Configurations rendering.** `structuredContent` always carries the whole configuration tree. The formatted text renders each CVE's CPE match criteria — the criteria string, its version bounds, whether the CPE is the vulnerable component or only the context it runs in, and the operators combining it — capped at the first 5 per CVE with a `… N more` trailer, matching the cap this formatter already applies to `references`. The cap is what keeps the block bounded: `limit` accepts up to 2000 CVEs, and a single complex CVE can carry dozens of criteria (CVE-2021-44224 has 37 across 7 node groups — 2,727 bytes rendered in full versus 373 capped). `nvd_get_cve` renders criteria through the same shared formatter and cap, so the two tools present the affected-product surface identically.
 
@@ -342,17 +358,17 @@ Both operators are rendered because they mean different things: a node's operato
 **Errors:**
 ```
 errors: [
-  { reason: 'missing_cpe_input', code: 'InvalidParams',
+  { reason: 'missing_cpe_input', code: 'ValidationError',
     when: 'Neither cpeName nor virtualMatchString provided.',
     retryable: false },
-  { reason: 'conflicting_cpe_inputs', code: 'InvalidParams',
+  { reason: 'conflicting_cpe_inputs', code: 'ValidationError',
     when: 'Both cpeName and virtualMatchString provided.',
     retryable: false },
-  { reason: 'version_range_without_match_string', code: 'InvalidParams',
+  { reason: 'version_range_without_match_string', code: 'ValidationError',
     when: 'versionStart or versionEnd provided without virtualMatchString.',
     retryable: false },
-  { reason: 'cpe_not_found', code: 'NotFound',
-    when: 'cpeName is a valid format but NVD returns no matching CVEs — the CPE may be misspelled or not in NVD. Use nvd_search_cpes to verify.',
+  { reason: 'invalid_cpe_format', code: 'ValidationError',
+    when: 'cpeName or virtualMatchString does not start with "cpe:2.3:".',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After. Keyed: one patient retry across the window. Keyless: fails fast naming NVD_API_KEY.',
@@ -390,8 +406,11 @@ At least one of `keyword` or `cpeMatchString` required.
 **Errors:**
 ```
 errors: [
-  { reason: 'missing_search_input', code: 'InvalidParams',
+  { reason: 'missing_search_input', code: 'ValidationError',
     when: 'Neither keyword nor cpeMatchString provided.',
+    retryable: false },
+  { reason: 'invalid_cpe_format', code: 'ValidationError',
+    when: 'cpeMatchString does not start with "cpe:2.3:".',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',
@@ -426,7 +445,7 @@ errors: [
 **Errors:**
 ```
 errors: [
-  { reason: 'invalid_cve_id_format', code: 'InvalidParams',
+  { reason: 'invalid_cve_id_format', code: 'ValidationError',
     when: 'CVE ID fails format validation (NVD returns HTTP 404 for malformed IDs).',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',

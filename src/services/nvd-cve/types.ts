@@ -3,8 +3,15 @@
  * @module services/nvd-cve/types
  */
 
-/** Raw CVSS metric from the NVD API response. */
+/**
+ * Raw CVSS metric from the NVD API response.
+ *
+ * `baseSeverity` appears at one of two depths depending on the metric array: `cvssMetricV2`
+ * carries it here, as a sibling of `cvssData`, while `cvssMetricV30`/`V31`/`V40` carry it inside
+ * `cvssData`. Both are declared so neither shape has to be inferred from the score.
+ */
 export interface RawCvssMetric {
+  baseSeverity?: string;
   cvssData?: {
     version?: string;
     vectorString?: string;

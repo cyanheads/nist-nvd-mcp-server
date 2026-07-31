@@ -414,6 +414,51 @@ describe('nvdSearchCves', () => {
     expect(enrichment.filtersApplied).not.toHaveProperty('noRejected');
   });
 
+  // Issue #44: exact-phrase search reaches the service and stays accountable in the echo.
+  it('threads exactPhrase to the service and echoes it alongside the keyword', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({
+      keyword: 'remote code execution',
+      exactPhrase: true,
+    });
+    await nvdSearchCves.handler(input, ctx);
+
+    const params = mockService.searchCves.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.exactPhrase).toBe(true);
+    expect(getEnrichment(ctx).filtersApplied).toMatchObject({
+      keyword: 'remote code execution',
+      exactPhrase: true,
+    });
+  });
+
+  it('leaves exactPhrase false by default and out of the echo', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext();
+    const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
+    await nvdSearchCves.handler(input, ctx);
+
+    const params = mockService.searchCves.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params.exactPhrase).toBe(false);
+    expect(getEnrichment(ctx).filtersApplied).not.toHaveProperty('exactPhrase');
+  });
+
+  /**
+   * A modifier the server accepts and then drops runs a broader search than the caller asked
+   * for and says nothing about it, so the missing companion is a declared failure instead.
+   */
+  it('rejects exactPhrase without a keyword rather than searching unmodified', async () => {
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
+    const input = nvdSearchCves.input.parse({ exactPhrase: true, cweId: 'CWE-79' });
+
+    await expect(nvdSearchCves.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'exact_phrase_without_keyword' },
+    });
+    expect(mockService.searchCves).not.toHaveBeenCalled();
+  });
+
   it('omits filtersApplied when the query ran unfiltered', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext();

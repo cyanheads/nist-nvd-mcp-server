@@ -78,6 +78,31 @@ describe('NvdHttpClient', () => {
     expect(mock).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * NVD's `hasKev`, `noRejected`, and `keywordExactMatch` are valueless flags: their presence is
+   * the signal. A `true` becomes a bare key, a `false` is left off entirely — sending
+   * `keywordExactMatch=false` would still enable it.
+   */
+  it('serializes boolean params as valueless flags and omits false ones', async () => {
+    const { mock } = stubFetch(() => new Response('{}', { status: 200 }));
+    const client = new NvdHttpClient(undefined, 10_000);
+
+    const result = settled(
+      client.get(
+        'cves/2.0',
+        { keywordSearch: 'remote code execution', keywordExactMatch: true, hasKev: false },
+        createMockContext(),
+      ),
+    );
+    await drainClock();
+    await result;
+
+    const url = new URL(mock.mock.calls[0]?.[0] as string);
+    expect(url.searchParams.get('keywordExactMatch')).toBe('');
+    expect(url.searchParams.has('hasKev')).toBe(false);
+    expect(url.searchParams.get('keywordSearch')).toBe('remote code execution');
+  });
+
   it('paces each retry through the rate-limit queue instead of bursting inside one slot', async () => {
     const { at } = stubFetch(() => new Response('{}', { status: 503 }));
     const client = new NvdHttpClient(undefined, 10_000);

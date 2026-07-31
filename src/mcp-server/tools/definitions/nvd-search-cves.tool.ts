@@ -37,6 +37,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       .string()
       .optional()
       .describe('Full-text search across CVE descriptions (AND-semantics across words).'),
+    exactPhrase: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When true, keyword matches as an exact phrase rather than ANDing its words independently. Requires keyword.',
+      ),
     severity: z
       .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
       .optional()
@@ -143,6 +149,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     filtersApplied: z
       .object({
         keyword: z.string().optional().describe('The keyword filter that was applied.'),
+        exactPhrase: z
+          .boolean()
+          .optional()
+          .describe(
+            'Present as true when the keyword was matched as an exact phrase rather than word-by-word.',
+          ),
         severity: z
           .string()
           .optional()
@@ -202,6 +214,13 @@ export const nvdSearchCves = tool('nvd_search_cves', {
 
   errors: [
     {
+      reason: 'exact_phrase_without_keyword',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'exactPhrase was set without a keyword. It selects how keyword matches and has nothing to modify on its own; NVD rejects the underlying flag on the same grounds.',
+      recovery:
+        'Supply the phrase in keyword alongside exactPhrase, or drop exactPhrase and search on the other filters.',
+    },
+    {
       reason: 'mutually_exclusive_params',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Both pubDays and pubStartDate/pubEndDate provided, or both lastModDays and lastModStartDate/lastModEndDate.',
@@ -256,6 +275,19 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       kevOnly: input.kevOnly,
       limit: input.limit,
     });
+
+    /**
+     * A filter the server accepts and then drops returns a broader result set than the caller
+     * asked for, with nothing in the response to say so — reject instead, as every other
+     * companion-parameter rule on this surface does.
+     */
+    if (input.exactPhrase && !input.keyword) {
+      throw ctx.fail(
+        'exact_phrase_without_keyword',
+        'exactPhrase selects how keyword is matched and cannot be used without one.',
+        ctx.recoveryFor('exact_phrase_without_keyword'),
+      );
+    }
 
     // Validate mutual exclusivity
     if (input.pubDays !== undefined && (input.pubStartDate || input.pubEndDate)) {
@@ -423,6 +455,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     const result = await service.searchCves(
       {
         ...(input.keyword && { keyword: input.keyword }),
+        exactPhrase: input.exactPhrase,
         ...(input.severity && { severityParam: input.severity }),
         severityVersion: input.severityVersion,
         ...(input.cweId && { cweId: input.cweId }),
@@ -444,6 +477,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
      */
     const filtersApplied = {
       ...(input.keyword && { keyword: input.keyword }),
+      ...(input.exactPhrase && { exactPhrase: true }),
       ...(input.severity && { severity: input.severity, severityVersion: input.severityVersion }),
       ...(input.cweId && { cweId: input.cweId }),
       ...(input.kevOnly && { kevOnly: true }),

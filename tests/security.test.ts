@@ -344,7 +344,12 @@ describe('Security — API key and secret non-disclosure', () => {
     expect(text).not.toContain('process.env');
   });
 
-  it('error from service does not leak apiKey in message', async () => {
+  /**
+   * A service error carrying a secret must reach the framework as a rejection, not be swallowed
+   * into a success envelope: `format()` only runs on success, so propagating is what keeps the
+   * secret out of every rendered block.
+   */
+  it('propagates a service error rather than returning a success envelope', async () => {
     const fakeApiKey = 'super-secret-api-key-9999';
     mockCveService.fetchById.mockRejectedValue(
       new Error(`Service error (key=${fakeApiKey}): failed`),
@@ -352,16 +357,7 @@ describe('Security — API key and secret non-disclosure', () => {
     const ctx = createMockContext();
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
 
-    // The handler re-throws the error — the test confirms format() doesn't include it
-    // Format is only called on success, so this verifies the error path stays clean
-    try {
-      await nvdGetCve.handler(input, ctx);
-    } catch (err) {
-      const errMsg = (err as Error).message;
-      // The error itself may contain the key (propagated from service),
-      // but format() is never called and there's no output to the client
-      expect(errMsg).toBeTruthy();
-    }
+    await expect(nvdGetCve.handler(input, ctx)).rejects.toThrow('Service error');
   });
 });
 
@@ -381,20 +377,24 @@ describe('Security — resource handler input validation', () => {
     });
   });
 
+  /**
+   * The rejection runs through `ctx.fail`, which only exists on a context carrying the
+   * definition's contract — without it these assert against a TypeError, not the guard.
+   */
   it('nvd://cve resource: path traversal attempt is rejected by CVE format validation', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: '../../etc/passwd' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
   it('nvd://cve resource: numeric-only string is rejected as invalid format', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: '12345678' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
   it('nvd://cve resource: injection string rejected before any network call', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = nvdCveResource.params.parse({ cveId: "<script>alert('xss')</script>" });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
     // Service should NOT have been called
@@ -462,10 +462,12 @@ describe('Security — unicode and encoding edge cases', () => {
       vulnStatus: 'Analyzed',
       published: '2021-12-10T10:15:00.000',
       severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
+      description: 'JNDI 注入 — Apache Log4j2 ≤2.14.1 の脆弱性 🔥',
     };
     const output = { cves: [briefWithUnicode] };
     const blocks = nvdSearchCves.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('CVE-2021-44228');
+    expect(text).toContain('JNDI 注入 — Apache Log4j2 ≤2.14.1 の脆弱性 🔥');
   });
 });
