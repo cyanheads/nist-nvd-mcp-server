@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** nist-nvd-mcp-server
-**Version:** 0.1.19
+**Version:** 0.2.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -238,6 +238,9 @@ src/
     nvd-cpe/
       nvd-cpe-service.ts               # CPE dictionary search and normalization
       types.ts                          # Raw CPE response + normalized CpeRecord
+    nvd-source/
+      nvd-source-service.ts            # Contributor dictionary — resolves source identifiers to names
+      types.ts                          # Raw source dictionary response types
   mcp-server/
     tools/definitions/
       nvd-search-cves.tool.ts           # nvd_search_cves

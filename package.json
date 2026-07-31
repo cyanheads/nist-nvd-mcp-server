@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/nist-nvd-mcp-server",
   "mcpName": "io.github.cyanheads/nist-nvd-mcp-server",
-  "version": "0.1.19",
+  "version": "0.2.0",
   "description": "Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
@@ -95,7 +95,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.5",
+    "@biomejs/biome": "^2.5.6",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
     "@types/node": "^26.1.2",
     "depcheck": "^1.4.7",
