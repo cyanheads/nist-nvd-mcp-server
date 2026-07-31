@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.19](changelog/0.1.x/0.1.19.md) — 2026-07-31
+
+nvd_audit_cpe and nvd_get_cve share one CveRecord schema; nvd_get_cve's advertised item schema now covers full mode, the default, instead of brief mode only; nvd_get_cve_history gains empty/partial-page notices; an NVD parameter rejection on a CPE input now translates to invalid_cpe_format on nvd_audit_cpe and nvd_search_cpes.
+
 ## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-31
 
 nvd_search_cves gains exactPhrase for phrase matching; nvd_audit_cpe returns an empty success instead of cpe_not_found for a target with no known CVEs; CVSS extraction keeps 0.0-scored entries and reads NVD's own v2 baseSeverity instead of deriving it; docs/design.md corrected from InvalidParams to ValidationError.

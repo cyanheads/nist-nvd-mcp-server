@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** nist-nvd-mcp-server
-**Version:** 0.1.18
+**Version:** 0.1.19
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -245,6 +245,11 @@ src/
       nvd-search-cpes.tool.ts          # nvd_search_cpes
       nvd-audit-cpe.tool.ts            # nvd_audit_cpe
       nvd-get-cve-history.tool.ts      # nvd_get_cve_history
+    tools/schemas/
+      brief-cve.ts                      # BriefCveRecord Zod shape, shared by every brief surface
+      full-cve.ts                       # CveRecord Zod shape, shared by every full-record surface
+    tools/formatting/
+      cpe-match.ts                      # Shared CPE match-criteria renderer and per-record cap
     resources/definitions/
       nvd-cve.resource.ts              # nvd://cve/{cveId}
 ```

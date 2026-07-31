@@ -147,7 +147,8 @@ nist-nvd-mcp-server/
 │   │       ├── formatting/
 │   │       │   └── cpe-match.ts
 │   │       └── schemas/
-│   │           └── brief-cve.ts
+│   │           ├── brief-cve.ts
+│   │           └── full-cve.ts
 │   ├── services/
 │   │   ├── nvd-cpe/
 │   │   │   ├── nvd-cpe-service.ts
