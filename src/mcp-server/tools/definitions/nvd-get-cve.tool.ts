@@ -137,7 +137,12 @@ export const nvdGetCve = tool('nvd_get_cve', {
     const service = getNvdCveService();
     const result = await service.fetchById(
       ids,
-      { includeReferences: input.includeReferences, allLanguages: input.allLanguages },
+      {
+        includeReferences: input.includeReferences,
+        allLanguages: input.allLanguages,
+        // Brief rows carry no `source` field, so resolving contributor names for them emits nothing.
+        resolveSources: !input.brief,
+      },
       ctx,
     );
 

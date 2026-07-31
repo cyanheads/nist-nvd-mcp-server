@@ -63,7 +63,11 @@ export const CveRecordSchema = z.object({
     .array(
       z
         .object({
-          source: z.string().describe('Weakness source (NVD or CNA).'),
+          source: z
+            .string()
+            .describe(
+              'Who classified the weakness, as the contributor name NVD publishes for it (e.g. "CVE", "CISA-ADP"). Contributors NVD identifies by email address keep that address (e.g. "nvd@nist.gov"); an identifier absent from NVD\'s contributor dictionary passes through as its raw value.',
+            ),
           cweIds: z
             .array(z.string().describe('One CWE identifier.'))
             .describe('CWE identifiers for this source.'),
@@ -105,7 +109,12 @@ export const CveRecordSchema = z.object({
       z
         .object({
           url: z.string().describe('Reference URL.'),
-          source: z.string().optional().describe('Reference source.'),
+          source: z
+            .string()
+            .optional()
+            .describe(
+              'Who contributed the reference, as the contributor name NVD publishes for it (e.g. "CVE", "CISA-ADP"). Contributors NVD identifies by email address keep that address (e.g. "security@apache.org"); an identifier absent from NVD\'s contributor dictionary passes through as its raw value.',
+            ),
           tags: z
             .array(z.string().describe('One classification tag.'))
             .optional()

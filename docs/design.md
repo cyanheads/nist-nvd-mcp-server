@@ -55,8 +55,9 @@ Primary audience: security-focused agents performing risk assessment, dependency
 |:--------|:------|:--------|
 | `NvdCveService` | NVD CVE API 2.0 + CVE History API | `nvd_get_cve`, `nvd_search_cves`, `nvd_audit_cpe`, `nvd_get_cve_history`, `nvd://cve/{cveId}` resource |
 | `NvdCpeService` | NVD CPE API 2.0 | `nvd_search_cpes`, `nvd_audit_cpe` (for CPE discovery leg) |
+| `NvdSourceService` | NVD Source API 2.0 | `NvdCveService`, to resolve `weaknesses[].source` and `references[].source` while normalizing a full record |
 
-Both services share a common HTTP layer with rate-limit queuing. A single `NvdHttpClient` handles queue management, API key injection, retry with backoff (every attempt paced through the queue), and `Retry-After` header parsing. The two API services delegate network calls to this client.
+All three share a common HTTP layer with rate-limit queuing. A single `NvdHttpClient` handles queue management, API key injection, retry with backoff (every attempt paced through the queue), and `Retry-After` header parsing. The API services delegate network calls to this client.
 
 ---
 
@@ -146,6 +147,16 @@ The derivation follows NVD's published v2.0 bands — `0.0–3.9` LOW, `4.0–6.
 `nvd_audit_cpe` returns an empty page with `totalCount: 0` when NVD holds no CVEs for the target, on both input arms. A product with a clean record and a mistyped CPE are indistinguishable from `totalResults: 0` alone, so raising `cpe_not_found` asserted the wrong one — and did so right after `nvd_search_cpes` had resolved the exact name the audit was handed. Telling a caller its CPE may not exist is the more expensive mistake: *this version has no known CVEs* is the answer a vulnerability audit exists to give.
 
 Confirming the name against `cpes/2.0` first would keep an accurate error, at the cost of a second upstream request against a 5 req/30s keyless budget. The empty-success path carries the caveat in the notice instead — it names the CPE string as the one thing still unconfirmed, without spending a request to say so.
+
+### Source identifiers are resolved in place, not carried alongside
+
+`weaknesses[].source` and `references[].source` hold NVD's raw contributor identifier. For a CNA that is a readable email (`security@apache.org`); for the two heaviest contributors on modern records it is a GUID — `af854a3a-2127-422b-91ae-364da2661108` (`CVE`) and `134c704f-9b21-4f2e-91b3-4a467353bcc0` (`CISA-ADP`) — which a reader cannot interpret and cannot look up without a second, undocumented API. Normalization resolves the identifier to the name NVD publishes for it and emits that in the identifier's place, on both `structuredContent` and `format()`.
+
+No sibling field preserves the GUID. The consumer of these records is a language model, for which the identifier is uninterpretable noise, and it stays recoverable from NVD's own dictionary for anyone who needs it. Email-form identifiers are left alone: they already name their contributor, so churning `security@apache.org` into `Apache Software Foundation` would change a familiar value for nothing.
+
+The dictionary comes from `/rest/json/source/2.0` — one page, 496 contributors, growing 55–60 a year since 2024 — fetched live rather than bundled as a snapshot. A snapshot costs no request but silently fails to resolve every contributor onboarded after the build, which is the exact failure the resolution exists to remove; the live fetch costs one request a day (cached, single-flighted so a burst cannot stampede it) and none at all on the surfaces that emit no `source` field — a search, and a `brief: true` fetch, whose trimmed rows drop it. When the dictionary cannot be loaded the identifiers pass through raw and the CVE lookup succeeds unchanged — a CVE query must not start failing because a secondary metadata endpoint is down.
+
+Succeeding unchanged is not enough on its own. The load runs inside the calling tool and shares the single pacing queue every NVD request passes through, so on the client's default effort an unreachable `source/2.0` would hold a CVE lookup across every attempt the retry budget allows — each with the full request timeout, plus the backoff between them — with every queued CVE request stuck behind it. The dictionary therefore gets one attempt on a three-second deadline — a fraction of what the record itself gets — and a five-minute failure TTL, so a sustained outage costs one short wait rather than one per call. A load cancelled by its own caller is not remembered as a failure at all: the caller walking away says nothing about whether NVD can serve the dictionary, so the next call tries again.
 
 ### History tool is separate, not an option on nvd_get_cve
 
@@ -241,7 +252,7 @@ Present only when the CVE appears in the CISA KEV catalog:
 **Output:**
 - `brief: boolean` — which mode produced the records below.
 - `cves[]` — one item schema spanning both modes, since a tool's `output` must be a flat object and cannot branch on a discriminator. `cveId`, `vulnStatus`, and `published` are the only required fields; every field either mode adds is declared optional, because the framework parses each success return against this schema and a full-record field marked required would reject every `brief: true` call.
-  - Full mode (the default) emits `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `references` (unless `includeReferences: false`), and `cisaKev` (KEV catalog members only).
+  - Full mode (the default) emits `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `references` (unless `includeReferences: false`), and `cisaKev` (KEV catalog members only). The `source` on a weakness or reference carries the contributor name NVD publishes for the identifier (`CVE`, `CISA-ADP`); an email-form identifier keeps its address, and an identifier the dictionary does not hold passes through raw. Brief mode drops `source` entirely, so it neither resolves nor reports one.
   - Brief mode emits `description` (first 200 characters, English-preferred), `severity`, and `cisaVulnerabilityName` — the trimmed substitutes for `descriptions` and `cisaKev`.
   - The full-record fields come from the shared `CveRecordSchema` (`src/mcp-server/tools/schemas/full-cve.ts`), which `nvd_audit_cpe` declares its own records with directly, so one declaration describes the domain type on both surfaces.
 

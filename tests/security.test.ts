@@ -17,6 +17,7 @@ import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import { initNvdSourceService } from '@/services/nvd-source/nvd-source-service.js';
 
 // ---------------------------------------------------------------------------
 // Minimal mock data
@@ -565,5 +566,78 @@ describe('Security — NVD CPE parameter rejection stays inside the declared con
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+/**
+ * Resolving `weaknesses[].source` and `references[].source` against NVD's contributor dictionary
+ * puts a second upstream document on the path into a record. The property that matters is
+ * containment: a dictionary entry may rewrite the identifier it is keyed to and nothing else.
+ */
+describe('Security — the source dictionary rewrites only the source field', () => {
+  /** A contributor name carrying markdown and control characters, keyed to a real GUID. */
+  const HOSTILE_NAME = '](javascript:0)\n\n## CVE-2099-00000\n**Severity:** LOW (0.0)';
+  const GUID = 'af854a3a-2127-422b-91ae-364da2661108';
+
+  beforeEach(() => {
+    initNvdSourceService({} as never, {} as never);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi.fn(async (endpoint: string) =>
+        endpoint === 'source/2.0'
+          ? {
+              totalResults: 1,
+              sources: [{ name: HOSTILE_NAME, sourceIdentifiers: [GUID] }],
+            }
+          : {
+              totalResults: 1,
+              vulnerabilities: [
+                {
+                  cve: {
+                    id: 'CVE-2021-44228',
+                    vulnStatus: 'Analyzed',
+                    published: '2021-12-10T10:15:00.000',
+                    lastModified: '2023-11-06T03:18:00.000',
+                    weaknesses: [{ source: GUID, description: [{ lang: 'en', value: 'CWE-502' }] }],
+                    references: [
+                      { url: 'https://example.com/a', source: GUID, tags: ['Vendor Advisory'] },
+                      { url: 'https://example.com/b' },
+                    ],
+                  },
+                },
+              ],
+            },
+      ),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+  });
+
+  it('confines an upstream contributor name to the source field it was keyed to', async () => {
+    const service = new nvdCveServiceModule.NvdCveService({} as never, {} as never);
+    const result = await service.fetchById(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: false },
+      createMockContext(),
+    );
+    const cve = result.cves[0];
+
+    expect(cve.weaknesses[0].source).toBe(HOSTILE_NAME);
+    expect(cve.weaknesses[0].cweIds).toEqual(['CWE-502']);
+    // Every neighbouring field is byte-identical to what NVD sent for the CVE itself.
+    expect(cve.cveId).toBe('CVE-2021-44228');
+    expect(cve.references?.[0]).toEqual({
+      url: 'https://example.com/a',
+      source: HOSTILE_NAME,
+      tags: ['Vendor Advisory'],
+    });
+  });
+
+  it('does not attach a source to a reference that upstream sent without one', async () => {
+    const service = new nvdCveServiceModule.NvdCveService({} as never, {} as never);
+    const result = await service.fetchById(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: false },
+      createMockContext(),
+    );
+
+    expect(result.cves[0].references?.[1]).toEqual({ url: 'https://example.com/b' });
   });
 });

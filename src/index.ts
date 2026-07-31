@@ -18,6 +18,7 @@ import {
 import { initNvdCpeService } from './services/nvd-cpe/nvd-cpe-service.js';
 import { initNvdCveService } from './services/nvd-cve/nvd-cve-service.js';
 import { initNvdHttpClient } from './services/nvd-http/nvd-http-client.js';
+import { initNvdSourceService } from './services/nvd-source/nvd-source-service.js';
 
 await createApp({
   name: 'nist-nvd-mcp-server',
@@ -39,5 +40,6 @@ await createApp({
     initNvdHttpClient(cfg.apiKey, cfg.requestTimeoutMs);
     initNvdCveService(core.config, core.storage);
     initNvdCpeService(core.config, core.storage);
+    initNvdSourceService(core.config, core.storage);
   },
 });

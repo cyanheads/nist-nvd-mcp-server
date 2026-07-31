@@ -85,6 +85,19 @@ export function isNvdRequestRejected(err: unknown): err is McpError {
   return err instanceof McpError && err.data?.reason === REQUEST_REJECTED_REASON;
 }
 
+/**
+ * Per-call overrides of the client's default effort. A secondary lookup the caller can proceed
+ * without must not spend the same retry and timeout budget as the record it decorates: on the
+ * default budget an unreachable endpoint stretches the calling tool by the full product of
+ * attempts and timeout, and holds the shared pacing queue for the same span.
+ */
+export interface NvdRequestBudget {
+  /** Retry attempts beyond the first. Defaults to the key-dependent budget. */
+  maxRetries?: number;
+  /** Per-attempt timeout in milliseconds. Defaults to the configured request timeout. */
+  timeoutMs?: number;
+}
+
 export class NvdHttpClient {
   private readonly apiKey: string | undefined;
   private readonly timeoutMs: number;
@@ -109,8 +122,10 @@ export class NvdHttpClient {
     endpoint: string,
     params: Record<string, string | number | boolean | undefined>,
     ctx: Context,
+    budget?: NvdRequestBudget,
   ): Promise<T> {
     let attemptIndex = 0;
+    const timeoutMs = budget?.timeoutMs ?? this.timeoutMs;
     return withRetry(
       () => {
         /**
@@ -119,11 +134,14 @@ export class NvdHttpClient {
          * all. Keyless has no budget to wait with; that arm fails fast and names NVD_API_KEY.
          */
         const mayWaitOutRateLimit = attemptIndex++ === 0 && !!this.apiKey;
-        return this.schedule(() => this.fetchOnce<T>(endpoint, params, ctx, mayWaitOutRateLimit));
+        return this.schedule(() =>
+          this.fetchOnce<T>(endpoint, params, ctx, mayWaitOutRateLimit, timeoutMs),
+        );
       },
       {
         operation: `NvdHttpClient.get:${endpoint}`,
-        maxRetries: this.apiKey ? MAX_RETRIES_WITH_KEY : MAX_RETRIES_WITHOUT_KEY,
+        maxRetries:
+          budget?.maxRetries ?? (this.apiKey ? MAX_RETRIES_WITH_KEY : MAX_RETRIES_WITHOUT_KEY),
         baseDelayMs: 2_000,
         signal: ctx.signal,
       },
@@ -166,6 +184,7 @@ export class NvdHttpClient {
     params: Record<string, string | number | boolean | undefined>,
     ctx: Context,
     mayWaitOutRateLimit: boolean,
+    timeoutMs: number,
   ): Promise<T> {
     // A queued attempt can wait out a rate-limit window; don't spend a slot once the caller is gone.
     if (ctx.signal.aborted) throw timeout('NVD request cancelled by caller.');
@@ -178,7 +197,7 @@ export class NvdHttpClient {
     this.lastRequestAt = Date.now();
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     // Chain caller's signal
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
@@ -192,7 +211,7 @@ export class NvdHttpClient {
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         if (ctx.signal.aborted) throw timeout('NVD request cancelled by caller.');
-        throw timeout(`NVD request timed out after ${this.timeoutMs}ms.`);
+        throw timeout(`NVD request timed out after ${timeoutMs}ms.`);
       }
       throw serviceUnavailable(
         `NVD API network error: ${(err as Error).message}`,

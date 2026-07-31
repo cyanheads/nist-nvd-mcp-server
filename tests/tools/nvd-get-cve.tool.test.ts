@@ -14,6 +14,18 @@ import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import { BRIEF_DESCRIPTION_CHARS, NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord, RawCveItem, RawCveResponse } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import * as nvdSourceServiceModule from '@/services/nvd-source/nvd-source-service.js';
+
+/**
+ * Source-name resolution has its own suite; every assertion here is about other fields, so the
+ * contributor dictionary is stubbed to a passthrough that costs no upstream call and leaves
+ * identifiers exactly as the fixtures wrote them.
+ */
+beforeEach(() => {
+  vi.spyOn(nvdSourceServiceModule, 'getNvdSourceService').mockReturnValue({
+    getResolver: async () => nvdSourceServiceModule.passthroughSourceNames,
+  } as unknown as ReturnType<typeof nvdSourceServiceModule.getNvdSourceService>);
+});
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -248,7 +260,26 @@ describe('nvdGetCve', () => {
 
     expect(mockService.fetchById).toHaveBeenCalledWith(
       ['CVE-2021-44228'],
-      { includeReferences: true, allLanguages: true },
+      { includeReferences: true, allLanguages: true, resolveSources: true },
+      ctx,
+    );
+  });
+
+  it('waives source-name resolution for a brief fetch, whose rows drop the field', async () => {
+    mockService.fetchById.mockResolvedValue({
+      cves: [FULL_CVE],
+      returned: 1,
+      requested: 1,
+      missingIds: [],
+    });
+    const ctx = createMockContext();
+    const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
+    await nvdGetCve.handler(input, ctx);
+
+    // Resolving here would spend an upstream dictionary request on values `toBriefCve` discards.
+    expect(mockService.fetchById).toHaveBeenCalledWith(
+      ['CVE-2021-44228'],
+      { includeReferences: true, allLanguages: false, resolveSources: false },
       ctx,
     );
   });
@@ -266,7 +297,7 @@ describe('nvdGetCve', () => {
 
     expect(mockService.fetchById).toHaveBeenCalledWith(
       ['CVE-2021-44228'],
-      { includeReferences: true, allLanguages: false },
+      { includeReferences: true, allLanguages: false, resolveSources: true },
       ctx,
     );
   });
