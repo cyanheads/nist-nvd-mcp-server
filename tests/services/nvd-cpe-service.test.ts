@@ -6,6 +6,7 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
 import { NvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 import type { RawCpeResponse } from '@/services/nvd-cpe/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
@@ -313,5 +314,80 @@ describe('NvdCpeService — CPE normalization', () => {
     const call = mockClient.get.mock.calls[0][1] as Record<string, unknown>;
     expect(call.keywordSearch).toBe('apache');
     expect(call.cpeMatchString).toBe('cpe:2.3:a:apache:http_server');
+  });
+});
+
+/**
+ * Issue #45: `cpeMatchString` is a partial-match parameter — a truncated prefix is a legitimate
+ * pattern NVD answers HTTP 200 with zero results for (verified live against
+ * `cpe:2.3:a:zzznotavendor`). It rejects only genuinely malformed characters, answering 404
+ * `Invalid cpeMatchstring parameter, see documentation.`, which reached the caller as an
+ * undeclared `nvd_request_rejected` with no recovery hint.
+ */
+describe('NvdCpeService.searchCpes — NVD CPE parameter rejection (issue #45)', () => {
+  const mockClient = { get: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      mockClient as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    mockClient.get.mockReset();
+  });
+
+  const service = new NvdCpeService({} as never, {} as never);
+
+  it('translates a rejected cpeMatchString into invalid_cpe_format with a recovery hint', async () => {
+    mockClient.get.mockRejectedValue(
+      nvdHttpClientModule.nvdRequestRejected(
+        'cpes/2.0',
+        'Invalid cpeMatchstring parameter, see documentation.',
+      ),
+    );
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+
+    await expect(
+      service.searchCpes({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' }, ctx),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_cpe_format',
+        cpe: 'cpe:2.3:a:zzz notavendor:%%%:',
+        recovery: { hint: expect.stringContaining('cpe:2.3:') },
+      },
+    });
+  });
+
+  it("keeps NVD's own diagnosis in the translated message", async () => {
+    mockClient.get.mockRejectedValue(
+      nvdHttpClientModule.nvdRequestRejected(
+        'cpes/2.0',
+        'Invalid cpeMatchstring parameter, see documentation.',
+      ),
+    );
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+
+    await expect(
+      service.searchCpes({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' }, ctx),
+    ).rejects.toThrow(/Invalid CPE string ".*"\..*Invalid cpeMatchstring parameter/);
+  });
+
+  it('leaves a zero-result cpeMatchString an empty success rather than a format error', async () => {
+    mockClient.get.mockResolvedValue({ totalResults: 0, products: [] });
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const result = await service.searchCpes({ cpeMatchString: 'cpe:2.3:a:zzznotavendor' }, ctx);
+
+    expect(result.cpes).toEqual([]);
+    expect(result.totalResults).toBe(0);
+  });
+
+  /** No CPE string to blame — a keyword-only search must surface the rejection as it arrived. */
+  it('rethrows a rejection untranslated when the query carried no cpeMatchString', async () => {
+    mockClient.get.mockRejectedValue(
+      nvdHttpClientModule.nvdRequestRejected('cpes/2.0', 'Invalid parameter.'),
+    );
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+
+    await expect(service.searchCpes({ keyword: 'apache' }, ctx)).rejects.toMatchObject({
+      data: { reason: 'nvd_request_rejected' },
+    });
   });
 });

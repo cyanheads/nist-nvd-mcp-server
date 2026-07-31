@@ -16,6 +16,7 @@ import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.to
 import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
+import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 
 // ---------------------------------------------------------------------------
 // Minimal mock data
@@ -311,17 +312,33 @@ describe('Security — API key and secret non-disclosure', () => {
     expect(serialized).not.toContain(fakeApiKey);
   });
 
-  it('nvd_get_cve format() does not expose bearer token in rendered text', () => {
-    const fakeBearerLeak = 'Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.fake';
-    // Format function is pure — it receives only what the handler returned
-    const output = {
-      brief: false,
-      cves: [MINIMAL_CVE as unknown as Record<string, unknown>],
-    };
-    const blocks = nvdGetCve.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).not.toContain(fakeBearerLeak);
-    expect(text).not.toContain('Bearer');
+  /**
+   * `format()` renders every declared field of a record now that both modes share one item
+   * schema, so "it renders only what the handler returned" is the property worth pinning: put a
+   * credential in the environment the process can actually reach and assert none of it lands in
+   * the rendered text.
+   */
+  it('nvd_get_cve format() renders only handler data, never process credentials', () => {
+    const fakeApiKey = 'NVD-KEY-SHOULD-NOT-APPEAR-a1b2c3';
+    const fakeBearer = 'Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.fake';
+    vi.stubEnv('NVD_API_KEY', fakeApiKey);
+    vi.stubEnv('AUTH_SECRET_KEY', fakeBearer);
+
+    try {
+      const text = (
+        nvdGetCve.format!({
+          brief: false,
+          cves: [MINIMAL_CVE as unknown as Record<string, unknown>],
+        })[0] as { text: string }
+      ).text;
+
+      expect(text).toContain('CVE-2021-44228');
+      expect(text).not.toContain(fakeApiKey);
+      expect(text).not.toContain(fakeBearer);
+      expect(text).not.toContain('Bearer');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('nvd_audit_cpe format() does not leak internal error details', () => {
@@ -469,5 +486,84 @@ describe('Security — unicode and encoding edge cases', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('CVE-2021-44228');
     expect(text).toContain('JNDI 注入 — Apache Log4j2 ≤2.14.1 の脆弱性 🔥');
+  });
+});
+
+/**
+ * Issue #45: the CPE tools' prefix check is not the only path to `invalid_cpe_format` — NVD
+ * rejects a CPE parameter it cannot parse with an HTTP 404, and that rejection used to reach the
+ * caller as an undeclared `nvd_request_rejected` with no recovery hint. The rejection is the CPE
+ * string's fault; a well-formed CPE with no matches stays an empty success.
+ */
+describe('Security — NVD CPE parameter rejection stays inside the declared contract', () => {
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new nvdCveServiceModule.NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue(
+      new nvdCpeServiceModule.NvdCpeService({} as never, {} as never),
+    );
+  });
+
+  /** Mock the HTTP client to reject exactly the way NVD does, message header and all. */
+  function rejectWith(endpoint: string, detail: string) {
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi.fn().mockRejectedValue(nvdHttpClientModule.nvdRequestRejected(endpoint, detail)),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+  }
+
+  it('nvd_audit_cpe: a structurally incomplete cpeName reports invalid_cpe_format', async () => {
+    rejectWith('cves/2.0', 'Invalid cpeName parameter, see documentation.');
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
+    const input = nvdAuditCpe.input.parse({ cpeName: 'cpe:2.3:a:zzznotavendor' });
+
+    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_cpe_format', recovery: { hint: expect.any(String) } },
+    });
+  });
+
+  it('nvd_audit_cpe: a malformed virtualMatchString reports invalid_cpe_format', async () => {
+    rejectWith('cves/2.0', 'Invalid virtualMatchString parameter, see documentation.');
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
+    const input = nvdAuditCpe.input.parse({ virtualMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' });
+
+    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_cpe_format' },
+    });
+  });
+
+  it('nvd_search_cpes: a malformed cpeMatchString reports invalid_cpe_format', async () => {
+    rejectWith('cpes/2.0', 'Invalid cpeMatchstring parameter, see documentation.');
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' });
+
+    await expect(nvdSearchCpes.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_cpe_format' },
+    });
+  });
+
+  /**
+   * The translated message quotes the caller's own CPE string and NVD's diagnosis. Neither is a
+   * secret, but the error must not widen into request internals the caller never supplied.
+   */
+  it('the translated message carries no request internals', async () => {
+    const fakeApiKey = 'NVD-KEY-SHOULD-NOT-APPEAR-a1b2c3';
+    vi.stubEnv('NVD_API_KEY', fakeApiKey);
+    rejectWith('cves/2.0', 'Invalid cpeName parameter, see documentation.');
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
+    const input = nvdAuditCpe.input.parse({ cpeName: 'cpe:2.3:a:zzznotavendor' });
+
+    try {
+      await nvdAuditCpe.handler(input, ctx);
+      expect.unreachable('handler should have thrown');
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toContain('cpe:2.3:a:zzznotavendor');
+      expect(message).not.toContain(fakeApiKey);
+      expect(message).not.toContain('services.nvd.nist.gov');
+      expect(message).not.toContain('apiKey');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

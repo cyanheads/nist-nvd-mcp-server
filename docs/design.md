@@ -240,8 +240,12 @@ Present only when the CVE appears in the CISA KEV catalog:
 
 **Output:**
 - `brief: boolean` — which mode produced the records below.
-- `cves: CveRecord[]` — array of CVE records. Each record includes: `cveId`, `vulnStatus`, `published`, `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `cisaKev` (if in KEV catalog).
-- In brief mode: `cves: BriefCveRecord[]` — trimmed to `cveId`, `vulnStatus`, `published`, `description` (first 200 characters, English-preferred), `severity`, `cisaVulnerabilityName`.
+- `cves[]` — one item schema spanning both modes, since a tool's `output` must be a flat object and cannot branch on a discriminator. `cveId`, `vulnStatus`, and `published` are the only required fields; every field either mode adds is declared optional, because the framework parses each success return against this schema and a full-record field marked required would reject every `brief: true` call.
+  - Full mode (the default) emits `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurations`, `references` (unless `includeReferences: false`), and `cisaKev` (KEV catalog members only).
+  - Brief mode emits `description` (first 200 characters, English-preferred), `severity`, and `cisaVulnerabilityName` — the trimmed substitutes for `descriptions` and `cisaKev`.
+  - The full-record fields come from the shared `CveRecordSchema` (`src/mcp-server/tools/schemas/full-cve.ts`), which `nvd_audit_cpe` declares its own records with directly, so one declaration describes the domain type on both surfaces.
+
+`format()` tests each field for presence instead of branching on `brief`: the record itself says which fields it carries, and a mode-branched formatter renders only one field set per call — leaving the other mode's fields unverifiable against the declared schema.
 
 **Enrichment:** this tool looks up specific IDs rather than paging a result set, so it carries no pagination fields.
 - `requested: number` — how many CVE IDs the call asked for
@@ -368,7 +372,7 @@ errors: [
     when: 'versionStart or versionEnd provided without virtualMatchString.',
     retryable: false },
   { reason: 'invalid_cpe_format', code: 'ValidationError',
-    when: 'cpeName or virtualMatchString does not start with "cpe:2.3:".',
+    when: 'cpeName or virtualMatchString does not start with "cpe:2.3:", or NVD rejected it as a malformed CPE parameter (HTTP 404) on either request arm. The two arms reject different inputs: cpeName refuses anything short of a complete CPEv2.3 name, while virtualMatchString accepts a truncated prefix as a legitimate pattern and refuses only genuinely malformed characters. A well-formed CPE no product matches is not this error — it is an empty success.',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After. Keyed: one patient retry across the window. Keyless: fails fast naming NVD_API_KEY.',
@@ -410,7 +414,7 @@ errors: [
     when: 'Neither keyword nor cpeMatchString provided.',
     retryable: false },
   { reason: 'invalid_cpe_format', code: 'ValidationError',
-    when: 'cpeMatchString does not start with "cpe:2.3:".',
+    when: 'cpeMatchString does not start with "cpe:2.3:", or NVD rejected it as a malformed CPE parameter (HTTP 404). A merely truncated prefix is a legitimate partial match and returns an empty page instead.',
     retryable: false },
   { reason: 'rate_limited', code: 'RateLimited',
     when: 'HTTP 403 with Retry-After; queue exhausted.',
@@ -430,7 +434,7 @@ errors: [
 - `cveId: string` — e.g., `"CVE-2021-44228"`
 - `limit?: number` — max change events returned (default 20, max 2000)
 - `offset?: number` — zero-based offset for pagination, counted from the end `order` anchors to
-- `order?: 'oldest' | 'newest'` — which end to page from (default `newest`). NVD serves history oldest-first, so `oldest` maps `offset` straight to `startIndex` in one request; `newest` reverses it, adding a second tail-anchored request only when the history is longer than `limit`
+- `order?: 'oldest' | 'newest'` — which end to page from (default `newest`). NVD serves history oldest-first, so `oldest` maps `offset` straight to `startIndex` in one request; `newest` reverses it, adding a second tail-anchored request only when the history is longer than `limit`. `oldest` pays for a second request only when its page comes back empty past offset 0: `cvehistory/2.0` zeroes `totalResults` for a `startIndex` past the end — unlike `cves/2.0` and `cpes/2.0`, which report the true count from any index — so the count is re-probed from the start before an overrun can be told from a CVE with no history
 
 **Output:**
 - `cveId: string`
@@ -441,6 +445,7 @@ errors: [
 - `returned: number` — events in this response
 - `offset: number` — page offset used
 - `order: 'oldest' | 'newest'` — which end of the history this page was anchored to, since `offset` counts from that end
+- `notice?: string` — distinguishes an `offset` past the end of the history, an empty page NVD returned inside a range it says has events, and a CVE NVD holds no history for; on a partial page it names the offset that reaches the next one, counted from the end `order` anchors to. The no-history branch names both causes it cannot separate — a record NVD never revised and a CVE ID NVD does not hold — and hands off to `nvd_get_cve`, the one call that tells them apart
 
 **Errors:**
 ```

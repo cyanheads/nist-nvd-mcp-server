@@ -6,6 +6,8 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
+import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
 import { nvdGetCve, REFERENCE_CAP } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
 import { CPE_MATCH_CAP } from '@/mcp-server/tools/formatting/cpe-match.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -667,5 +669,162 @@ describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () =
       score: 9.8,
       fromVersion: '3.1',
     });
+  });
+});
+
+/**
+ * Issues #37 and #38: the full-record shape was declared twice — once inside `nvd_audit_cpe`, and
+ * not at all here, where the advertised item was the brief row reused for both modes. A schema-
+ * driven client reading the default (`brief: false`) surface saw two fields it could never
+ * receive and none of the seven it would.
+ */
+describe('nvdGetCve — advertised item schema (issues #37, #38)', () => {
+  const jsonSchema = (def: { output: unknown }) =>
+    toJSONSchema(def.output as never, { io: 'output', unrepresentable: 'any' }) as {
+      properties: { cves: { items: { properties: Record<string, unknown>; required: string[] } } };
+    };
+
+  const getCveItem = jsonSchema(nvdGetCve).properties.cves.items;
+  const auditCpeItem = jsonSchema(nvdAuditCpe).properties.cves.items;
+
+  /** Every field the full record adds beyond the three both modes always carry. */
+  const FULL_RECORD_FIELDS = [
+    'lastModified',
+    'descriptions',
+    'cvssScores',
+    'severity',
+    'weaknesses',
+    'configurations',
+    'references',
+    'cisaKev',
+  ];
+
+  it('declares the full-record fields the default call actually returns', () => {
+    expect(Object.keys(getCveItem.properties)).toEqual(expect.arrayContaining(FULL_RECORD_FIELDS));
+  });
+
+  it('still declares the two brief-only substitutes', () => {
+    expect(Object.keys(getCveItem.properties)).toEqual(
+      expect.arrayContaining(['description', 'cisaVulnerabilityName']),
+    );
+  });
+
+  it.each(FULL_RECORD_FIELDS)('describes %s identically to nvd_audit_cpe', (field) => {
+    expect(getCveItem.properties[field]).toEqual(auditCpeItem.properties[field]);
+  });
+
+  /**
+   * The framework parses every success return against this schema, so a field promoted to
+   * required over a value one mode omits is a runtime outage, not a documentation nit.
+   */
+  it('requires only the three fields both modes always carry', () => {
+    expect(getCveItem.required).toEqual(['cveId', 'vulnStatus', 'published']);
+  });
+
+  it('parses a brief row and a full record against the same declared output', () => {
+    expect(() =>
+      nvdGetCve.output.parse({
+        brief: true,
+        cves: [
+          {
+            cveId: 'CVE-2021-44228',
+            vulnStatus: 'Analyzed',
+            published: '2021-12-10T10:15:00.000',
+            description: 'Apache Log4j2 JNDI vulnerability.',
+            severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
+            cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
+          },
+        ],
+      }),
+    ).not.toThrow();
+
+    expect(() => nvdGetCve.output.parse({ brief: false, cves: [FULL_CVE] })).not.toThrow();
+  });
+
+  it('keeps the full record intact through the output parse', () => {
+    const parsed = nvdGetCve.output.parse({ brief: false, cves: [FULL_CVE] });
+    expect(parsed.cves[0]).toEqual(FULL_CVE);
+  });
+});
+
+/**
+ * Issue #38: `format()` branched on `brief` and rendered one field set per call, so the widened
+ * schema would leave the other branch's fields unrendered. It is now one total pass keyed on
+ * field presence.
+ */
+describe('nvdGetCve — total format() across both modes (issue #38)', () => {
+  /** Every declared field populated at once — the shape the format-parity walk feeds. */
+  const BOTH_MODES = {
+    ...FULL_CVE,
+    description: 'Truncated brief prose.',
+    cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
+  } as unknown as Record<string, unknown>;
+
+  const render = (cves: Record<string, unknown>[], brief = false) =>
+    (nvdGetCve.format!({ brief, cves })[0] as { text: string }).text;
+
+  it('renders both modes field sets from one sample, whatever brief says', () => {
+    for (const brief of [true, false]) {
+      const text = render([BOTH_MODES], brief);
+
+      // Brief-only fields.
+      expect(text).toContain('Truncated brief prose.');
+      expect(text).toContain('**CISA KEV:** Apache Log4j2 Remote Code Execution Vulnerability');
+      // Full-only fields.
+      expect(text).toContain('2023-11-06T03:18:00.000');
+      expect(text).toContain('[en] Apache Log4j2 JNDI vulnerability.');
+      expect(text).toContain('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H');
+      expect(text).toContain('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*');
+      expect(text).toContain('**CISA KEV Details:**');
+    }
+  });
+
+  it('renders the weakness source alongside its CWE ids', () => {
+    expect(render([FULL_CVE as unknown as Record<string, unknown>])).toContain('NVD: CWE-20');
+  });
+
+  /**
+   * A KEV listing is the line a triage read scans a brief row for. Rendering it after the
+   * description would fold it into that paragraph, behind 200 characters of prose.
+   */
+  it('keeps a brief row KEV name with the metadata, above the description', () => {
+    const briefRow = {
+      cveId: 'CVE-2021-44228',
+      vulnStatus: 'Analyzed',
+      published: '2021-12-10T10:15:00.000',
+      severity: { label: 'CRITICAL', score: 10, fromVersion: '3.1' },
+      description: 'Truncated brief prose.',
+      cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
+    };
+    const text = render([briefRow], true);
+
+    expect(text.indexOf('**Severity:**')).toBeLessThan(text.indexOf('**CISA KEV:**'));
+    expect(text.indexOf('**CISA KEV:**')).toBeLessThan(text.indexOf('Truncated brief prose.'));
+  });
+
+  it('renders a reference source when NVD supplies one', () => {
+    const withSource = {
+      ...FULL_CVE,
+      references: [
+        { url: 'https://example.invalid/a', source: 'cve@mitre.org', tags: ['Vendor Advisory'] },
+      ],
+    } as unknown as Record<string, unknown>;
+
+    expect(render([withSource])).toContain(
+      'https://example.invalid/a [cve@mitre.org] (Vendor Advisory)',
+    );
+  });
+
+  it('omits the Last Modified segment on a brief row that carries none', () => {
+    const briefRow = {
+      cveId: 'CVE-2021-44228',
+      vulnStatus: 'Analyzed',
+      published: '2021-12-10T10:15:00.000',
+    };
+    const text = render([briefRow], true);
+
+    expect(text).toContain('**Status:** Analyzed | **Published:** 2021-12-10T10:15:00.000');
+    expect(text).not.toContain('Last Modified');
+    expect(text).not.toContain('undefined');
   });
 });

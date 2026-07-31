@@ -108,7 +108,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     {
       reason: 'invalid_cpe_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The cpeMatchString does not start with "cpe:2.3:" — it is clearly not a valid CPEv2.3 string.',
+      when: 'The cpeMatchString does not start with "cpe:2.3:", or NVD rejected it as a malformed CPE parameter. A merely truncated prefix is a legitimate partial match and returns an empty page instead.',
       recovery:
         'Provide a valid CPEv2.3 string starting with "cpe:2.3:", or use keyword search to find the correct CPE name.',
     },

@@ -76,8 +76,12 @@ export function nvdRequestRejected(endpoint: string, detail?: string): McpError 
   );
 }
 
-/** True when `err` is the {@link nvdRequestRejected} throw. */
-export function isNvdRequestRejected(err: unknown): boolean {
+/**
+ * True when `err` is the {@link nvdRequestRejected} throw. Narrows to {@link McpError} so a
+ * caller translating the rejection can read NVD's own diagnosis off `message` and chain it as
+ * `cause` without casting back off `unknown`.
+ */
+export function isNvdRequestRejected(err: unknown): err is McpError {
   return err instanceof McpError && err.data?.reason === REQUEST_REJECTED_REASON;
 }
 

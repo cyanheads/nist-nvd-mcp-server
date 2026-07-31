@@ -7,16 +7,33 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
 import { UnfilteredBriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
+import {
+  CONDITIONAL_FULL_CVE_FIELDS,
+  CveRecordSchema,
+} from '@/mcp-server/tools/schemas/full-cve.js';
 import { getNvdCveService, toBriefCve } from '@/services/nvd-cve/nvd-cve-service.js';
-import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
 
 /**
- * References rendered per CVE. A dense record runs to ~100 references at roughly 116 bytes a line
- * (CVE-2021-44228 carries 103, ~11.6KB rendered in full). 15 covers the advisory/patch/exploit
- * cluster a triage decision turns on for ~2KB per record, and the trailer discloses the remainder
- * that `structuredContent` still carries in full.
+ * References rendered per CVE. A dense record runs to ~100 references at roughly 140 bytes a line
+ * once the URL, its contributing source, and its tags are on it (CVE-2021-44228 carries 103,
+ * ~14.4KB rendered in full). 15 covers the advisory/patch/exploit cluster a triage decision turns
+ * on for ~2.3KB per record, and the trailer discloses the remainder that `structuredContent`
+ * still carries in full.
  */
 export const REFERENCE_CAP = 15;
+
+/**
+ * One item schema spanning both modes. `brief` is an input flag, not an output discriminator the
+ * schema can branch on — a tool's `output` must be a flat object — so every field either mode adds
+ * beyond the three both always carry is declared optional. Optional is not cosmetic here: the
+ * framework parses each success return against this schema, and a full-record field marked
+ * required would reject every `brief: true` call.
+ */
+const CveItemSchema = CveRecordSchema.partial(CONDITIONAL_FULL_CVE_FIELDS)
+  .extend(
+    UnfilteredBriefCveRecordSchema.pick({ description: true, cisaVulnerabilityName: true }).shape,
+  )
+  .loose();
 
 export const nvdGetCve = tool('nvd_get_cve', {
   title: 'Get CVE Details',
@@ -60,25 +77,17 @@ export const nvdGetCve = tool('nvd_get_cve', {
       ),
   }),
 
-  /**
-   * The brief row is declared in full — it is this server's own shape, shared with nvd_search_cves.
-   * Full records are the same fields plus the upstream detail, so the item stays loose rather
-   * than aspirationally re-typing NVD's schema.
-   */
   output: z.object({
     brief: z.boolean().describe('Whether brief or full records were returned.'),
     cves: z
       .array(
-        UnfilteredBriefCveRecordSchema.loose().describe(
-          'One CVE record. Brief mode carries exactly these fields. ' +
-            'Full mode adds CVSS scores across every version, descriptions by language, ' +
-            'configurations, weaknesses, references, and the full CISA KEV block.',
+        CveItemSchema.describe(
+          'One CVE record. Every field beyond cveId, vulnStatus, and published depends on the mode: ' +
+            'full mode (the default) carries all of them except description and cisaVulnerabilityName, ' +
+            'which are the brief-mode substitutes for descriptions and cisaKev.',
         ),
       )
-      .describe(
-        'CVE records. In full mode: complete records with CVSS scores, configurations, weaknesses, and references. ' +
-          'In brief mode: trimmed records with ID, status, top severity, truncated description, and CISA KEV name.',
-      ),
+      .describe('CVE records — full detail by default, trimmed rows when brief is true.'),
   }),
 
   enrichment: {
@@ -149,98 +158,98 @@ export const nvdGetCve = tool('nvd_get_cve', {
     return { brief: false, cves: result.cves };
   },
 
+  /**
+   * One pass over both modes, testing each field for presence rather than branching on `brief`:
+   * the flag describes the call, and the record itself says which fields it carries. A
+   * mode-branched formatter would also leave the other branch's fields unrendered for any
+   * consumer that walks the declared schema rather than a live response.
+   */
   format: (result) => {
     const lines: string[] = [];
     lines.push(`**Mode:** ${result.brief ? 'Brief' : 'Full'}\n`);
 
-    for (const rawCve of result.cves) {
-      if (result.brief) {
-        const cve = rawCve as unknown as BriefCveRecord & { cisaVulnerabilityName?: string };
-        lines.push(`## ${cve.cveId}`);
-        lines.push(`**Status:** ${cve.vulnStatus} | **Published:** ${cve.published}`);
-        if (cve.severity) {
-          lines.push(
-            `**Severity:** ${cve.severity.label} (${cve.severity.score}) from CVSS ${cve.severity.fromVersion}`,
-          );
-        } else {
-          lines.push('**Severity:** Not available (no CVSS scores)');
-        }
-        if (cve.cisaVulnerabilityName) {
-          lines.push(`**CISA KEV:** ${cve.cisaVulnerabilityName}`);
-        }
-        if (cve.description) {
-          lines.push(cve.description);
-        }
-      } else {
-        const cve = rawCve as unknown as CveRecord;
-        lines.push(`## ${cve.cveId}`);
+    for (const cve of result.cves) {
+      lines.push(`## ${cve.cveId}`);
+      lines.push(
+        `**Status:** ${cve.vulnStatus} | **Published:** ${cve.published}` +
+          (cve.lastModified ? ` | **Last Modified:** ${cve.lastModified}` : ''),
+      );
+
+      if (cve.severity) {
         lines.push(
-          `**Status:** ${cve.vulnStatus} | **Published:** ${cve.published} | **Last Modified:** ${cve.lastModified}`,
+          `**Severity:** ${cve.severity.label} (${cve.severity.score}) from CVSS ${cve.severity.fromVersion}`,
         );
+      } else {
+        lines.push('**Severity:** Not available (no CVSS scores)');
+      }
 
-        if (cve.severity) {
+      // The brief row's KEV name, in place of the full block below. Sits with the rest of the
+      // row's metadata rather than after its prose — a KEV listing is the line a triage read
+      // scans for, and trailing the description would fold it into that paragraph.
+      if (cve.cisaVulnerabilityName) lines.push(`**CISA KEV:** ${cve.cisaVulnerabilityName}`);
+
+      if (cve.cvssScores && cve.cvssScores.length > 0) {
+        lines.push('\n**CVSS Scores:**');
+        for (const s of cve.cvssScores) {
           lines.push(
-            `**Severity:** ${cve.severity.label} (${cve.severity.score}) from CVSS ${cve.severity.fromVersion}`,
+            `- v${s.version} (${s.sourceType}): ${s.baseScore} ${s.severity}${s.vectorString ? ` — ${s.vectorString}` : ''}`,
           );
-        } else {
-          lines.push('**Severity:** Not available (no CVSS scores)');
-        }
-
-        if (cve.cvssScores && cve.cvssScores.length > 0) {
-          lines.push('\n**CVSS Scores:**');
-          for (const s of cve.cvssScores) {
-            lines.push(
-              `- v${s.version} (${s.sourceType}): ${s.baseScore} ${s.severity}${s.vectorString ? ` — ${s.vectorString}` : ''}`,
-            );
-          }
-        }
-
-        /**
-         * Render every description the record carries. The service already applied the language
-         * policy — English-only by default (falling back when a record has no English entry),
-         * every language when `allLanguages` is set — so picking one here would make that input
-         * inert for clients that read `content[]` instead of `structuredContent`.
-         */
-        for (const desc of cve.descriptions ?? []) {
-          lines.push(`\n[${desc.lang}] ${desc.value}`);
-        }
-
-        if (cve.weaknesses && cve.weaknesses.length > 0) {
-          const allCwes = cve.weaknesses.flatMap((w) => w.cweIds).filter(Boolean);
-          if (allCwes.length > 0) lines.push(`**Weaknesses:** ${allCwes.join(', ')}`);
-        }
-
-        if (cve.configurations && cve.configurations.length > 0) {
-          const matches = flattenCpeMatches(cve.configurations);
-          lines.push(
-            `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
-          );
-          for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
-          if (matches.length > CPE_MATCH_CAP) {
-            lines.push(
-              `  - … ${matches.length - CPE_MATCH_CAP} more — call nvd_audit_cpe with a specific cpeName to test whether a product version is affected.`,
-            );
-          }
-        }
-
-        if (cve.cisaKev) {
-          lines.push(`\n**CISA KEV Details:**`);
-          lines.push(`- Name: ${cve.cisaKev.vulnerabilityName}`);
-          lines.push(`- Added: ${cve.cisaKev.exploitAddDate}`);
-          lines.push(`- Action Due: ${cve.cisaKev.actionDueDate}`);
-          lines.push(`- Required Action: ${cve.cisaKev.requiredAction}`);
-        }
-
-        if (cve.references && cve.references.length > 0) {
-          lines.push(`\n**References (${cve.references.length}):**`);
-          for (const ref of cve.references.slice(0, REFERENCE_CAP)) {
-            lines.push(`- ${ref.url}${ref.tags?.length ? ` [${ref.tags.join(', ')}]` : ''}`);
-          }
-          if (cve.references.length > REFERENCE_CAP) {
-            lines.push(`- … ${cve.references.length - REFERENCE_CAP} more references`);
-          }
         }
       }
+
+      // The brief row's single truncated snippet, in place of the per-language array below.
+      if (cve.description) lines.push(`\n${cve.description}`);
+
+      /**
+       * Render every description the record carries. The service already applied the language
+       * policy — English-only by default (falling back when a record has no English entry),
+       * every language when `allLanguages` is set — so picking one here would make that input
+       * inert for clients that read `content[]` instead of `structuredContent`.
+       */
+      for (const desc of cve.descriptions ?? []) {
+        lines.push(`\n[${desc.lang}] ${desc.value}`);
+      }
+
+      if (cve.weaknesses && cve.weaknesses.length > 0) {
+        lines.push('**Weaknesses:**');
+        for (const w of cve.weaknesses) {
+          if (w.cweIds.length > 0) lines.push(`- ${w.source}: ${w.cweIds.join(', ')}`);
+        }
+      }
+
+      if (cve.configurations && cve.configurations.length > 0) {
+        const matches = flattenCpeMatches(cve.configurations);
+        lines.push(
+          `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
+        );
+        for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
+        if (matches.length > CPE_MATCH_CAP) {
+          lines.push(
+            `  - … ${matches.length - CPE_MATCH_CAP} more — call nvd_audit_cpe with a specific cpeName to test whether a product version is affected.`,
+          );
+        }
+      }
+
+      if (cve.cisaKev) {
+        lines.push(`\n**CISA KEV Details:**`);
+        lines.push(`- Name: ${cve.cisaKev.vulnerabilityName}`);
+        lines.push(`- Added: ${cve.cisaKev.exploitAddDate}`);
+        lines.push(`- Action Due: ${cve.cisaKev.actionDueDate}`);
+        lines.push(`- Required Action: ${cve.cisaKev.requiredAction}`);
+      }
+
+      if (cve.references && cve.references.length > 0) {
+        lines.push(`\n**References (${cve.references.length}):**`);
+        for (const ref of cve.references.slice(0, REFERENCE_CAP)) {
+          const source = ref.source ? ` [${ref.source}]` : '';
+          const tags = ref.tags?.length ? ` (${ref.tags.join(', ')})` : '';
+          lines.push(`- ${ref.url}${source}${tags}`);
+        }
+        if (cve.references.length > REFERENCE_CAP) {
+          lines.push(`- … ${cve.references.length - REFERENCE_CAP} more references`);
+        }
+      }
+
       lines.push('');
     }
 

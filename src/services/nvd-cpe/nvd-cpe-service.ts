@@ -6,8 +6,9 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { getNvdHttpClient } from '../nvd-http/nvd-http-client.js';
+import { getNvdHttpClient, isNvdRequestRejected } from '../nvd-http/nvd-http-client.js';
 import type { CpeRecord, RawCpeItem, RawCpeResponse } from './types.js';
 
 /** Normalize a raw CPE item to a CpeRecord. */
@@ -57,7 +58,29 @@ export class NvdCpeService {
     if (params.keyword) apiParams.keywordSearch = params.keyword;
     if (params.cpeMatchString) apiParams.cpeMatchString = params.cpeMatchString;
 
-    const response = await client.get<RawCpeResponse>('cpes/2.0', apiParams, ctx);
+    let response: RawCpeResponse;
+    try {
+      response = await client.get<RawCpeResponse>('cpes/2.0', apiParams, ctx);
+    } catch (err) {
+      /**
+       * The tool's prefix check clears any string starting `cpe:2.3:`, but NVD rejects a pattern
+       * carrying genuinely malformed characters with a 404. A merely truncated prefix is a
+       * legitimate partial match here and comes back as an empty HTTP 200, so only the rejection
+       * means the string itself is at fault.
+       */
+      if (params.cpeMatchString && isNvdRequestRejected(err)) {
+        throw validationError(
+          `Invalid CPE string "${params.cpeMatchString}". ${err.message}`,
+          {
+            reason: 'invalid_cpe_format',
+            cpe: params.cpeMatchString,
+            ...ctx.recoveryFor('invalid_cpe_format'),
+          },
+          { cause: err },
+        );
+      }
+      throw err;
+    }
 
     const items = (response.products ?? []).map((p) => p.cpe).filter((c): c is RawCpeItem => !!c);
 

@@ -6,9 +6,12 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
+import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord } from '@/services/nvd-cve/types.js';
+import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -826,5 +829,95 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
     for (const [shapeName, marker] of Object.entries(SHAPES)) {
       if (shapeName !== name) expect(notice).not.toContain(marker);
     }
+  });
+});
+
+/**
+ * Issue #37: the full-record shape now lives in one place (`tools/schemas/full-cve.ts`) that
+ * `nvd_get_cve` also builds from. Consolidation was meant to leave this tool's advertised contract
+ * exactly as it was — pin the field list and the required set so a later edit to the shared schema
+ * cannot quietly change what this tool promises.
+ */
+describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
+  const item = (
+    toJSONSchema(nvdAuditCpe.output as never, { io: 'output', unrepresentable: 'any' }) as {
+      properties: { cves: { items: { properties: Record<string, unknown>; required: string[] } } };
+    }
+  ).properties.cves.items;
+
+  it('advertises exactly the eleven full-record fields', () => {
+    expect(Object.keys(item.properties)).toEqual([
+      'cveId',
+      'vulnStatus',
+      'published',
+      'lastModified',
+      'descriptions',
+      'cvssScores',
+      'severity',
+      'weaknesses',
+      'configurations',
+      'references',
+      'cisaKev',
+    ]);
+  });
+
+  /** `references`, `severity`, and `cisaKev` are all conditionally emitted upstream. */
+  it('requires only the fields the normalizer assigns unconditionally', () => {
+    expect(item.required).toEqual([
+      'cveId',
+      'vulnStatus',
+      'published',
+      'lastModified',
+      'descriptions',
+      'cvssScores',
+      'weaknesses',
+      'configurations',
+    ]);
+  });
+});
+
+/**
+ * Issue #45: an NVD CPE parameter rejection used to reach the caller as `nvd_request_rejected` —
+ * a reason this tool never declares — with no `Recovery:` line on the rendered error.
+ */
+describe('nvdAuditCpe — NVD CPE rejection carries the declared contract (issue #45)', () => {
+  const mockService = { auditCpe: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.auditCpe.mockReset();
+  });
+
+  it('surfaces a service-translated rejection as the declared invalid_cpe_format', async () => {
+    const service = new NvdCveService({} as never, {} as never);
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(service);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi
+        .fn()
+        .mockRejectedValue(
+          nvdHttpClientModule.nvdRequestRejected(
+            'cves/2.0',
+            'Invalid cpeName parameter, see documentation.',
+          ),
+        ),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
+    const input = nvdAuditCpe.input.parse({ cpeName: 'cpe:2.3:a:zzznotavendor' });
+
+    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_cpe_format',
+        recovery: { hint: expect.stringContaining('nvd_search_cpes') },
+      },
+    });
+  });
+
+  it('names both causes of invalid_cpe_format in the error contract', () => {
+    const entry = nvdAuditCpe.errors?.find((e) => e.reason === 'invalid_cpe_format');
+    expect(entry?.when).toContain('cpe:2.3:');
+    expect(entry?.when).toContain('NVD rejected');
   });
 });

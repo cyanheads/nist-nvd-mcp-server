@@ -8,7 +8,9 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
 import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
+import { NvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 import type { CpeRecord } from '@/services/nvd-cpe/types.js';
+import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 
 const CPE_APACHE: CpeRecord = {
   cpeName: 'cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*',
@@ -340,5 +342,60 @@ describe('nvdSearchCpes — empty-page notices (issue #34)', () => {
       const notice = await noticeFor(offset, total);
       expect(notice).not.toContain('truncated');
     }
+  });
+});
+
+/**
+ * Issue #45: a `cpeMatchString` NVD rejects outright used to surface as `nvd_request_rejected`,
+ * a reason this tool never declares, with no `Recovery:` line on the rendered error.
+ */
+describe('nvdSearchCpes — NVD CPE rejection carries the declared contract (issue #45)', () => {
+  beforeEach(() => {
+    vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue(
+      new NvdCpeService({} as never, {} as never),
+    );
+  });
+
+  it('surfaces a service-translated rejection as the declared invalid_cpe_format', async () => {
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi
+        .fn()
+        .mockRejectedValue(
+          nvdHttpClientModule.nvdRequestRejected(
+            'cpes/2.0',
+            'Invalid cpeMatchstring parameter, see documentation.',
+          ),
+        ),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' });
+
+    await expect(nvdSearchCpes.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_cpe_format',
+        recovery: { hint: expect.stringContaining('cpe:2.3:') },
+      },
+    });
+  });
+
+  /** A truncated prefix is a legitimate partial match — it must stay an empty page, not an error. */
+  it('leaves a zero-result truncated pattern an empty page with a notice', async () => {
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi.fn().mockResolvedValue({ totalResults: 0, products: [] }),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:zzznotavendor' });
+    const result = await nvdSearchCpes.handler(input, ctx);
+
+    expect(result.cpes).toEqual([]);
+    expect(getEnrichment(ctx).notice).toContain('No CPEs matched');
+  });
+
+  it('names both causes of invalid_cpe_format in the error contract', () => {
+    const entry = nvdSearchCpes.errors?.find((e) => e.reason === 'invalid_cpe_format');
+    expect(entry?.when).toContain('cpe:2.3:');
+    expect(entry?.when).toContain('NVD rejected');
   });
 });
