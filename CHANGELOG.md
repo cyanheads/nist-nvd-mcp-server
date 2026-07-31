@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-31
+
+nvd_search_cves gains exactPhrase for phrase matching; nvd_audit_cpe returns an empty success instead of cpe_not_found for a target with no known CVEs; CVSS extraction keeps 0.0-scored entries and reads NVD's own v2 baseSeverity instead of deriving it; docs/design.md corrected from InvalidParams to ValidationError.
+
 ## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-27
 
 nvd_search_cves, nvd_search_cpes, and nvd_audit_cpe distinguish an offset past the result set from an empty page NVD returned inside a range it says has matches; nvd_search_cves and nvd_audit_cpe gain a next-page notice; nvd_get_cve's brief mode now shares its row builder with nvd_search_cves instead of duplicating it inline.
