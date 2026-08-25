@@ -17,6 +17,7 @@ import {
   NvdSourceService,
 } from '@/services/nvd-source/nvd-source-service.js';
 import type { RawNvdSourceResponse } from '@/services/nvd-source/types.js';
+import { at } from '../support/at.js';
 
 /** Three real dictionary entries: two GUID-only contributors and one identified by email. */
 const SOURCE_RESPONSE: RawNvdSourceResponse = {
@@ -82,8 +83,13 @@ const CVE_RESPONSE: RawCveResponse = {
 
 /** Route the mocked client by endpoint so the dictionary and CVE calls stay distinguishable. */
 function makeClient(sourceResult: () => Promise<unknown>) {
-  const get = vi.fn(async (endpoint: string) =>
-    endpoint === 'source/2.0' ? await sourceResult() : CVE_RESPONSE,
+  const get = vi.fn(
+    async (
+      endpoint: string,
+      _params?: Record<string, unknown>,
+      _ctx?: unknown,
+      _budget?: { maxRetries?: number; timeoutMs?: number },
+    ) => (endpoint === 'source/2.0' ? await sourceResult() : CVE_RESPONSE),
   );
   return {
     get,
@@ -115,26 +121,26 @@ describe('NvdSourceService — source identifier resolution', () => {
       { includeReferences: true, allLanguages: false },
       createMockContext(),
     );
-    return result.cves[0];
+    return at(result.cves);
   }
 
   it('resolves a GUID identifier to its published contributor name', async () => {
     const cve = await fetchOne();
-    expect(cve.weaknesses[0].source).toBe('CISA-ADP');
-    expect(cve.references?.[0].source).toBe('CVE');
+    expect(at(cve.weaknesses, 0).source).toBe('CISA-ADP');
+    expect(at(cve.references, 0).source).toBe('CVE');
   });
 
   it('leaves an email-form identifier untouched', async () => {
     const cve = await fetchOne();
     // `security@apache.org` is already legible — it must not become "Apache Software Foundation".
-    expect(cve.weaknesses[1].source).toBe('security@apache.org');
-    expect(cve.references?.[1].source).toBe('security@apache.org');
+    expect(at(cve.weaknesses, 1).source).toBe('security@apache.org');
+    expect(at(cve.references, 1).source).toBe('security@apache.org');
   });
 
   it('passes an identifier the dictionary does not carry through as its raw value', async () => {
     const cve = await fetchOne();
-    expect(cve.weaknesses[2].source).toBe('00000000-0000-0000-0000-000000000000');
-    expect(cve.references?.[2].source).toBe('00000000-0000-0000-0000-000000000000');
+    expect(at(cve.weaknesses, 2).source).toBe('00000000-0000-0000-0000-000000000000');
+    expect(at(cve.references, 2).source).toBe('00000000-0000-0000-0000-000000000000');
   });
 
   it('degrades to raw identifiers when the dictionary request fails, without failing the call', async () => {
@@ -144,15 +150,15 @@ describe('NvdSourceService — source identifier resolution', () => {
     const cve = await fetchOne();
 
     expect(cve.cveId).toBe('CVE-2024-23225');
-    expect(cve.weaknesses[0].source).toBe('134c704f-9b21-4f2e-91b3-4a467353bcc0');
-    expect(cve.references?.[0].source).toBe('af854a3a-2127-422b-91ae-364da2661108');
+    expect(at(cve.weaknesses, 0).source).toBe('134c704f-9b21-4f2e-91b3-4a467353bcc0');
+    expect(at(cve.references, 0).source).toBe('af854a3a-2127-422b-91ae-364da2661108');
   });
 
   it('degrades to raw identifiers when the dictionary body is unusable', async () => {
     // HTTP 200 with a body carrying no `sources` — an empty dictionary, not a thrown error.
     install(async () => ({ totalResults: 0 }));
     const cve = await fetchOne();
-    expect(cve.weaknesses[0].source).toBe('134c704f-9b21-4f2e-91b3-4a467353bcc0');
+    expect(at(cve.weaknesses, 0).source).toBe('134c704f-9b21-4f2e-91b3-4a467353bcc0');
   });
 
   it('fetches the dictionary once across repeated calls', async () => {
@@ -189,7 +195,7 @@ describe('NvdSourceService — source identifier resolution', () => {
     const cves = await calls;
 
     expect(client.sourceCalls()).toBe(1);
-    for (const cve of cves) expect(cve.weaknesses[0].source).toBe('CISA-ADP');
+    for (const cve of cves) expect(at(cve.weaknesses, 0).source).toBe('CISA-ADP');
   });
 
   it('does not fetch the dictionary for a search, whose brief rows carry no source field', async () => {
@@ -216,8 +222,8 @@ describe('NvdSourceService — source identifier resolution', () => {
       createMockContext(),
     );
 
-    expect(result.cves[0].weaknesses[0].source).toBe('CISA-ADP');
-    expect(result.cves[0].references?.[0].source).toBe('CVE');
+    expect(at(at(result.cves).weaknesses, 0).source).toBe('CISA-ADP');
+    expect(at(at(result.cves).references, 0).source).toBe('CVE');
   });
 
   it('requests the dictionary within the endpoint page-size ceiling', async () => {
@@ -225,7 +231,7 @@ describe('NvdSourceService — source identifier resolution', () => {
 
     const call = client.get.mock.calls.find(([endpoint]) => endpoint === 'source/2.0');
     expect(call).toBeDefined();
-    const params = call?.[1] as Record<string, unknown>;
+    const params = call?.[1] ?? {};
     // `source/2.0` answers a resultsPerPage above 1000 with the same HTTP 404 it uses to reject
     // any other bad parameter, so the request must stay at or under it.
     expect(Number(params.resultsPerPage)).toBeLessThanOrEqual(1000);
@@ -235,7 +241,7 @@ describe('NvdSourceService — source identifier resolution', () => {
     await new NvdSourceService({} as never, {} as never).getResolver(createMockContext());
 
     const call = client.get.mock.calls.find(([endpoint]) => endpoint === 'source/2.0');
-    const budget = call?.[3] as { maxRetries?: number; timeoutMs?: number } | undefined;
+    const budget = call?.[3];
     /**
      * The load sits inside the calling tool and shares one pacing queue with the CVE requests, so
      * an unreachable endpoint must cost a single short wait — not attempts × timeout × backoff.

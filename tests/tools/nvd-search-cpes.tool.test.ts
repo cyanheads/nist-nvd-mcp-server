@@ -11,6 +11,7 @@ import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
 import { NvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 import type { CpeRecord } from '@/services/nvd-cpe/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import { at } from '../support/at.js';
 
 const CPE_APACHE: CpeRecord = {
   cpeName: 'cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*',
@@ -48,13 +49,13 @@ describe('nvdSearchCpes', () => {
 
   it('returns CPE entries and enrichment for a keyword search', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache http server' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
     expect(result.cpes).toHaveLength(1);
-    expect(result.cpes[0].cpeName).toBe('cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*');
-    expect(result.cpes[0].deprecated).toBe(false);
+    expect(at(result.cpes, 0).cpeName).toBe('cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*');
+    expect(at(result.cpes, 0).deprecated).toBe(false);
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(1);
@@ -63,12 +64,12 @@ describe('nvdSearchCpes', () => {
 
   it('returns CPE entries for a cpeMatchString search', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:apache:http_server' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
     expect(result.cpes).toHaveLength(1);
-    expect(result.cpes[0].cpeName).toContain('apache:http_server');
+    expect(at(result.cpes, 0).cpeName).toContain('apache:http_server');
   });
 
   it('throws missing_search_input when neither keyword nor cpeMatchString provided', async () => {
@@ -81,24 +82,24 @@ describe('nvdSearchCpes', () => {
 
   it('handles deprecated CPE with deprecatedBy list', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_DEPRECATED], 1));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
-    expect(result.cpes[0].deprecated).toBe(true);
-    expect(result.cpes[0].deprecatedBy).toContain(
+    expect(at(result.cpes, 0).deprecated).toBe(true);
+    expect(at(result.cpes, 0).deprecatedBy).toContain(
       'cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*',
     );
   });
 
   it('handles CPE without title (sparse upstream payload)', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_NO_TITLE], 1));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'some_vendor' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
-    expect(result.cpes[0].title).toBeUndefined();
-    expect(result.cpes[0].cpeName).toBe('cpe:2.3:a:some_vendor:some_product:1.0:*:*:*:*:*:*:*');
+    expect(at(result.cpes, 0).title).toBeUndefined();
+    expect(at(result.cpes, 0).cpeName).toBe('cpe:2.3:a:some_vendor:some_product:1.0:*:*:*:*:*:*:*');
   });
 
   it('handles empty search results with enriched notice', async () => {
@@ -108,7 +109,7 @@ describe('nvdSearchCpes', () => {
       returned: 0,
       offset: 0,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'nonexistent_product_xyz' });
     const result = await nvdSearchCpes.handler(input, ctx);
 
@@ -169,7 +170,7 @@ describe('nvdSearchCpes', () => {
       returned: 1,
       offset: 0,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -180,7 +181,7 @@ describe('nvdSearchCpes', () => {
   // Issue #31: startIndex was hardcoded to 0, so results past the first page were unreachable.
   it('threads offset through to the service and echoes it in enrichment', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 21_178, 60));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 3, offset: 60 });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -192,7 +193,7 @@ describe('nvdSearchCpes', () => {
 
   it('defaults offset to 0 when omitted', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache' });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -205,7 +206,7 @@ describe('nvdSearchCpes', () => {
   // notice must name the offset that actually reaches the remainder.
   it('points the truncation notice at paging rather than at narrowing the keyword', async () => {
     mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 21_178, 60));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 1, offset: 60 });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -218,7 +219,7 @@ describe('nvdSearchCpes', () => {
   it('omits the truncation notice when the page reaches the end of the result set', async () => {
     // offset 60 + 1 returned === totalResults 61: nothing is left, so no "more available" nudge.
     mockService.searchCpes.mockResolvedValue(makeSearchResult([CPE_APACHE], 61, 60));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 1, offset: 60 });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -232,7 +233,7 @@ describe('nvdSearchCpes', () => {
       returned: 0,
       offset: 500,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache', offset: 500 });
     await nvdSearchCpes.handler(input, ctx);
 
@@ -293,9 +294,10 @@ describe('nvdSearchCpes — empty-page notices (issue #34)', () => {
   /** Notice raised for an empty page at `offset` when NVD reports `totalResults` matches. */
   async function noticeFor(offset: number, totalResults: number): Promise<string | undefined> {
     mockService.searchCpes.mockResolvedValue({ cpes: [], totalResults, returned: 0, offset });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     await nvdSearchCpes.handler(nvdSearchCpes.input.parse({ keyword: 'apache', offset }), ctx);
-    return getEnrichment(ctx).notice;
+    const { notice } = getEnrichment(ctx);
+    return typeof notice === 'string' ? notice : undefined;
   }
 
   it('blames the offset only once it has reached totalCount', async () => {

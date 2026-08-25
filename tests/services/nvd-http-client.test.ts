@@ -30,13 +30,43 @@ const API_KEY = 'test-api-key';
  */
 function stubFetch(respond: (callIndex: number) => Response) {
   const at: number[] = [];
-  const mock = vi.fn(() => {
+  const mock = vi.fn((_input: string | URL | Request, _init?: RequestInit) => {
     const index = at.length;
     at.push(Date.now());
     return Promise.resolve(respond(index));
   });
   vi.stubGlobal('fetch', mock);
   return { at, mock };
+}
+
+/** Recorded request at `index`, or a loud failure naming how many were actually made. */
+function requestAt(at: readonly number[], index: number): number {
+  const value = at[index];
+  if (value === undefined) {
+    throw new Error(`expected a request at index ${index}; only ${at.length} were made`);
+  }
+  return value;
+}
+
+/** Virtual-clock gap between two recorded requests. */
+function gapBetween(at: readonly number[], first: number, second: number): number {
+  return requestAt(at, second) - requestAt(at, first);
+}
+
+type FetchMock = ReturnType<typeof stubFetch>['mock'];
+
+/** The URL of the `index`-th recorded request. */
+function requestUrl(mock: FetchMock, index: number): URL {
+  const call = mock.mock.calls[index];
+  if (!call) throw new Error(`expected a request at index ${index}`);
+  return new URL(String(call[0]));
+}
+
+/** The headers of the `index`-th recorded request. */
+function requestHeaders(mock: FetchMock, index: number): Record<string, string> {
+  const call = mock.mock.calls[index];
+  if (!call) throw new Error(`expected a request at index ${index}`);
+  return (call[1]?.headers ?? {}) as Record<string, string>;
 }
 
 const rateLimitedResponse = () =>
@@ -97,7 +127,7 @@ describe('NvdHttpClient', () => {
     await drainClock();
     await result;
 
-    const url = new URL(mock.mock.calls[0]?.[0] as string);
+    const url = requestUrl(mock, 0);
     expect(url.searchParams.get('keywordExactMatch')).toBe('');
     expect(url.searchParams.has('hasKev')).toBe(false);
     expect(url.searchParams.get('keywordSearch')).toBe('remote code execution');
@@ -113,7 +143,7 @@ describe('NvdHttpClient', () => {
 
     // Keyless budget is 5 per 30s — one transient blip must not eat four of those slots.
     expect(at).toHaveLength(2);
-    expect(at[1] - at[0]).toBeGreaterThanOrEqual(KEYLESS_GAP_MS);
+    expect(gapBetween(at, 0, 1)).toBeGreaterThanOrEqual(KEYLESS_GAP_MS);
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
   });
 
@@ -143,9 +173,9 @@ describe('NvdHttpClient', () => {
     expect(await result).toBeInstanceOf(McpError);
     expect(at).toHaveLength(2);
     // The parsed Retry-After governs the wait, not withRetry's 2s exponential.
-    expect(at[1] - at[0]).toBeGreaterThanOrEqual(WINDOW_MS);
+    expect(gapBetween(at, 0, 1)).toBeGreaterThanOrEqual(WINDOW_MS);
     // A second patient retry would land past the deadline and surface as an opaque client hang.
-    expect(at[1] - at[0]).toBeLessThan(MCP_REQUEST_DEADLINE_MS);
+    expect(gapBetween(at, 0, 1)).toBeLessThan(MCP_REQUEST_DEADLINE_MS);
   });
 
   it('holds a queued call until the 403 Retry-After window has elapsed', async () => {
@@ -161,7 +191,7 @@ describe('NvdHttpClient', () => {
     expect(await first).toBeInstanceOf(McpError);
     expect(await second).toEqual({ totalResults: 0 });
     expect(at).toHaveLength(2);
-    expect(at[1] - at[0]).toBeGreaterThanOrEqual(WINDOW_MS);
+    expect(gapBetween(at, 0, 1)).toBeGreaterThanOrEqual(WINDOW_MS);
   });
 
   it('fails fast on 404 — a rejected request cannot succeed on retry', async () => {
@@ -234,13 +264,12 @@ describe('NvdHttpClient', () => {
 
     // An absent or unparseable header must not disable the backoff via NaN.
     expect(err.data?.retryAfter).toBe(WINDOW_MS / 1000);
-    expect(at[1] - at[0]).toBeGreaterThanOrEqual(WINDOW_MS);
+    expect(gapBetween(at, 0, 1)).toBeGreaterThanOrEqual(WINDOW_MS);
   });
 
   it('sends the API key header only when one is configured', async () => {
     const { mock } = stubFetch(() => new Response('{}', { status: 200 }));
-    const headersOf = (call: number) =>
-      (mock.mock.calls[call][1] as RequestInit).headers as Record<string, string>;
+    const headersOf = (call: number) => requestHeaders(mock, call);
 
     const keyed = settled(
       new NvdHttpClient(API_KEY, 10_000).get('cves/2.0', {}, createMockContext()),

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord } from '@/services/nvd-cve/types.js';
+import { at } from '../support/at.js';
 
 const BRIEF_CVE: BriefCveRecord = {
   cveId: 'CVE-2021-44228',
@@ -36,6 +37,22 @@ function makeSearchResult(cves: BriefCveRecord[] = [BRIEF_CVE], total = 1) {
   return { cves, totalResults: total, returned: cves.length, offset: 0 };
 }
 
+/**
+ * `getEnrichment` hands back an untyped bag, so read `datesClamped` through a narrowing that
+ * fails loudly rather than an index into `unknown`.
+ */
+function clampedEntries(ctx: Parameters<typeof getEnrichment>[0]): Array<{
+  param: string;
+  original: number;
+  clamped: number;
+}> {
+  const value = getEnrichment(ctx).datesClamped;
+  if (!Array.isArray(value)) {
+    throw new Error(`expected a datesClamped array on the enrichment, got ${typeof value}`);
+  }
+  return value as Array<{ param: string; original: number; clamped: number }>;
+}
+
 describe('nvdSearchCves', () => {
   const mockService = { searchCves: vi.fn() };
 
@@ -48,12 +65,12 @@ describe('nvdSearchCves', () => {
 
   it('returns CVE summaries and enrichment for a keyword search', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
     const result = await nvdSearchCves.handler(input, ctx);
 
     expect(result.cves).toHaveLength(1);
-    expect(result.cves[0].cveId).toBe('CVE-2021-44228');
+    expect(at(result.cves, 0).cveId).toBe('CVE-2021-44228');
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(1);
@@ -64,7 +81,7 @@ describe('nvdSearchCves', () => {
 
   it('applies defaults when no filters are provided', async () => {
     mockService.searchCves.mockResolvedValue({ cves: [], totalResults: 0, returned: 0, offset: 0 });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({});
     const result = await nvdSearchCves.handler(input, ctx);
 
@@ -75,27 +92,25 @@ describe('nvdSearchCves', () => {
 
   it('clamps pubDays over 120 and reports clamping in enrichment', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ pubDays: 200 });
     await nvdSearchCves.handler(input, ctx);
 
-    const enrichment = getEnrichment(ctx);
-    expect(enrichment.datesClamped).toHaveLength(1);
-    expect(enrichment.datesClamped![0].param).toBe('pubDays');
-    expect(enrichment.datesClamped![0].original).toBe(200);
-    expect(enrichment.datesClamped![0].clamped).toBe(120);
+    expect(clampedEntries(ctx)).toHaveLength(1);
+    expect(at(clampedEntries(ctx)).param).toBe('pubDays');
+    expect(at(clampedEntries(ctx)).original).toBe(200);
+    expect(at(clampedEntries(ctx)).clamped).toBe(120);
   });
 
   it('clamps lastModDays over 120 and reports clamping', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ lastModDays: 150 });
     await nvdSearchCves.handler(input, ctx);
 
-    const enrichment = getEnrichment(ctx);
-    expect(enrichment.datesClamped).toHaveLength(1);
-    expect(enrichment.datesClamped![0].param).toBe('lastModDays');
-    expect(enrichment.datesClamped![0].original).toBe(150);
+    expect(clampedEntries(ctx)).toHaveLength(1);
+    expect(at(clampedEntries(ctx)).param).toBe('lastModDays');
+    expect(at(clampedEntries(ctx)).original).toBe(150);
   });
 
   it('throws mutually_exclusive_params when pubDays and pubStartDate are both provided', async () => {
@@ -135,19 +150,19 @@ describe('nvdSearchCves', () => {
 
   it('preserves CVEs without severity in output (sparse upstream payload)', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult([BRIEF_CVE_NO_SEVERITY], 1));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({});
     const result = await nvdSearchCves.handler(input, ctx);
 
-    expect(result.cves[0].severity).toBeUndefined();
-    expect(result.cves[0].cveId).toBe('CVE-2022-00001');
+    expect(at(result.cves, 0).severity).toBeUndefined();
+    expect(at(result.cves, 0).cveId).toBe('CVE-2022-00001');
   });
 
   it('formats output with CVE IDs and severity present', () => {
     const output = { cves: [BRIEF_CVE] };
     const blocks = nvdSearchCves.format!(output);
-    expect(blocks[0].type).toBe('text');
-    const text = (blocks[0] as { text: string }).text;
+    expect(at(blocks, 0).type).toBe('text');
+    const text = (at(blocks, 0) as { text: string }).text;
     expect(text).toContain('CVE-2021-44228');
     expect(text).toContain('CRITICAL');
     expect(text).toContain('10');
@@ -156,7 +171,7 @@ describe('nvdSearchCves', () => {
   it('formats empty result with no-match placeholder', () => {
     const output = { cves: [] };
     const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
     expect(text).toBeTruthy();
     // format() renders domain payload only; enrichment trailer carries notices
   });
@@ -164,7 +179,7 @@ describe('nvdSearchCves', () => {
   it('formats CVE without severity using "Not available"', () => {
     const output = { cves: [BRIEF_CVE_NO_SEVERITY] };
     const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
     expect(text).toContain('Not available');
     expect(text).not.toMatch(/Severity:.*undefined/);
   });
@@ -218,11 +233,11 @@ describe('nvdSearchCves', () => {
   it('daysAgo/nowIso produce parseable ISO 8601 dates (forwarded to service)', async () => {
     // Capture what date strings get passed to the service when pubDays is used
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ pubDays: 30 });
     await nvdSearchCves.handler(input, ctx);
 
-    const call = mockService.searchCves.mock.calls[0][0] as Record<string, unknown>;
+    const call = at(mockService.searchCves.mock.calls)[0] as Record<string, unknown>;
     const startDate = new Date(call.pubStartDate as string);
     const endDate = new Date(call.pubEndDate as string);
     expect(Number.isNaN(startDate.getTime())).toBe(false);
@@ -312,7 +327,7 @@ describe('nvdSearchCves', () => {
       returned: 0,
       offset: 9999,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ offset: 9999 });
     await nvdSearchCves.handler(input, ctx);
 
@@ -329,7 +344,7 @@ describe('nvdSearchCves', () => {
       returned: 0,
       offset: 0,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({});
     await nvdSearchCves.handler(input, ctx);
 
@@ -339,15 +354,14 @@ describe('nvdSearchCves', () => {
 
   it('enriches datesClamped when pubDays exceeds 120', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ pubDays: 200 });
     await nvdSearchCves.handler(input, ctx);
 
-    const enrichment = getEnrichment(ctx);
-    expect(enrichment.datesClamped).toHaveLength(1);
-    expect(enrichment.datesClamped![0].param).toBe('pubDays');
-    expect(enrichment.datesClamped![0].original).toBe(200);
-    expect(enrichment.datesClamped![0].clamped).toBe(120);
+    expect(clampedEntries(ctx)).toHaveLength(1);
+    expect(at(clampedEntries(ctx)).param).toBe('pubDays');
+    expect(at(clampedEntries(ctx)).original).toBe(200);
+    expect(at(clampedEntries(ctx)).clamped).toBe(120);
   });
 
   // Issue #12: description accuracy (regression guard — the description text is read in catalog tests)
@@ -361,8 +375,9 @@ describe('nvdSearchCves', () => {
     expect(severityInput).not.toContain('or above');
     expect(severityInput).toContain('exactly this CVSS severity band');
 
-    const echoed =
-      nvdSearchCves.enrichment.filtersApplied.unwrap().shape.severity.description ?? '';
+    const enrichmentShape = nvdSearchCves.enrichment;
+    if (!enrichmentShape) throw new Error('nvdSearchCves must declare an enrichment block');
+    const echoed = enrichmentShape.filtersApplied.unwrap().shape.severity.description ?? '';
     expect(echoed).not.toContain('floor');
     expect(echoed).toContain('exact');
   });
@@ -370,11 +385,11 @@ describe('nvdSearchCves', () => {
   // Issue #24: the per-row filtered-version severity passes through and renders.
   it('passes filteredSeverity through from the service to output', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult([BRIEF_CVE_DIVERGENT]));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ severity: 'CRITICAL', severityVersion: 'v3' });
     const result = await nvdSearchCves.handler(input, ctx);
 
-    expect(result.cves[0].filteredSeverity).toEqual({
+    expect(at(result.cves, 0).filteredSeverity).toEqual({
       label: 'CRITICAL',
       score: 9.8,
       fromVersion: '3.1',
@@ -384,7 +399,7 @@ describe('nvdSearchCves', () => {
   it('renders both the headline and the filtered-version severity in format()', () => {
     const output = { cves: [BRIEF_CVE_DIVERGENT] };
     const blocks = nvdSearchCves.format!(output);
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
     expect(text).toContain('CVE-2014-6271');
     // Cross-version headline (HIGH) and the reconciled filter-version score (CRITICAL 9.8).
     expect(text).toContain('HIGH');
@@ -395,7 +410,7 @@ describe('nvdSearchCves', () => {
   // Issue #19: the query echoes the non-default filters it actually applied.
   it('echoes non-default filters in the filtersApplied enrichment', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({
       keyword: 'log4j',
       severity: 'CRITICAL',
@@ -417,7 +432,7 @@ describe('nvdSearchCves', () => {
   // Issue #44: exact-phrase search reaches the service and stays accountable in the echo.
   it('threads exactPhrase to the service and echoes it alongside the keyword', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({
       keyword: 'remote code execution',
       exactPhrase: true,
@@ -434,7 +449,7 @@ describe('nvdSearchCves', () => {
 
   it('leaves exactPhrase false by default and out of the echo', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
     await nvdSearchCves.handler(input, ctx);
 
@@ -461,7 +476,7 @@ describe('nvdSearchCves', () => {
 
   it('omits filtersApplied when the query ran unfiltered', async () => {
     mockService.searchCves.mockResolvedValue(makeSearchResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({});
     await nvdSearchCves.handler(input, ctx);
 
@@ -480,18 +495,18 @@ describe('nvdSearchCves', () => {
     mockService.searchCves.mockResolvedValue(
       makeSearchResult([{ ...BRIEF_CVE, description: 'Apache Log4j2 JNDI vulnerability.' }]),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
     const result = await nvdSearchCves.handler(input, ctx);
 
-    expect(result.cves[0].description).toBe('Apache Log4j2 JNDI vulnerability.');
+    expect(at(result.cves, 0).description).toBe('Apache Log4j2 JNDI vulnerability.');
   });
 
   it('renders the description snippet in format() so content[] matches structuredContent', () => {
     const blocks = nvdSearchCves.format!({
       cves: [{ ...BRIEF_CVE, description: 'Apache Log4j2 JNDI vulnerability.' }],
     });
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
 
     expect(text).toContain('Apache Log4j2 JNDI vulnerability.');
     expect(text).toContain('CVE-2021-44228');
@@ -500,14 +515,14 @@ describe('nvdSearchCves', () => {
   it('renders a truncated snippet with its ellipsis intact', () => {
     const truncated = `${'A'.repeat(200)}…`;
     const blocks = nvdSearchCves.format!({ cves: [{ ...BRIEF_CVE, description: truncated }] });
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
 
     expect(text).toContain(truncated);
   });
 
   it('renders a row with no description without emitting an undefined placeholder', () => {
     const blocks = nvdSearchCves.format!({ cves: [BRIEF_CVE_NO_SEVERITY] });
-    const text = (blocks[0] as { text: string }).text;
+    const text = (at(blocks, 0) as { text: string }).text;
 
     expect(text).toContain('CVE-2022-00001');
     expect(text).not.toContain('undefined');
@@ -532,9 +547,10 @@ describe('nvdSearchCves — empty-page notices (issue #34)', () => {
   /** Notice raised for an empty page at `offset` when NVD reports `totalResults` matches. */
   async function noticeFor(offset: number, totalResults: number): Promise<string | undefined> {
     mockService.searchCves.mockResolvedValue({ cves: [], totalResults, returned: 0, offset });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     await nvdSearchCves.handler(nvdSearchCves.input.parse({ offset }), ctx);
-    return getEnrichment(ctx).notice;
+    const { notice } = getEnrichment(ctx);
+    return typeof notice === 'string' ? notice : undefined;
   }
 
   it('blames the offset only once it has reached totalCount', async () => {
@@ -577,7 +593,7 @@ describe('nvdSearchCves — empty-page notices (issue #34)', () => {
       returned: 1,
       offset: 40,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     await nvdSearchCves.handler(nvdSearchCves.input.parse({ offset: 40 }), ctx);
 
     // A non-empty partial page gets the next-page notice (#36) and none of the empty-page ones.
@@ -619,12 +635,13 @@ describe('nvdSearchCves — next-page notice (issue #36)', () => {
       returned,
       offset,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     await nvdSearchCves.handler(
       nvdSearchCves.input.parse({ keyword: 'log4j', offset, limit: returned || 1 }),
       ctx,
     );
-    return getEnrichment(ctx).notice;
+    const { notice } = getEnrichment(ctx);
+    return typeof notice === 'string' ? notice : undefined;
   }
 
   it('names the next page offset on a partial first page', async () => {
@@ -660,7 +677,7 @@ describe('nvdSearchCves — next-page notice (issue #36)', () => {
       returned: 0,
       offset: 99,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     await nvdSearchCves.handler(nvdSearchCves.input.parse({ keyword: 'log4j', offset: 99 }), ctx);
 
     const notice = getEnrichment(ctx).notice as string;

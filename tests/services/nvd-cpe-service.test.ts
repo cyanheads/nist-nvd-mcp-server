@@ -10,6 +10,7 @@ import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.to
 import { NvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 import type { RawCpeResponse } from '@/services/nvd-cpe/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import { at } from '../support/at.js';
 
 function makeRawCpeResponse(overrides: Partial<RawCpeResponse> = {}): RawCpeResponse {
   return {
@@ -29,7 +30,9 @@ function makeRawCpeResponse(overrides: Partial<RawCpeResponse> = {}): RawCpeResp
 }
 
 describe('NvdCpeService — CPE normalization', () => {
-  const mockClient = { get: vi.fn() };
+  const mockClient = {
+    get: vi.fn(async (_endpoint: string, _params?: Record<string, unknown>) => ({})),
+  };
 
   beforeEach(() => {
     vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
@@ -46,7 +49,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const result = await service.searchCpes({ keyword: 'apache' }, ctx);
 
     expect(result.cpes).toHaveLength(1);
-    const cpe = result.cpes[0];
+    const cpe = at(result.cpes);
     expect(cpe.cpeName).toBe('cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*');
     expect(cpe.title).toBe('Apache HTTP Server 2.4.51');
     expect(cpe.deprecated).toBe(false);
@@ -73,7 +76,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     const result = await service.searchCpes({ keyword: 'vendor' }, ctx);
 
-    expect(result.cpes[0].title).toBe('Vendor Product 1.0');
+    expect(at(result.cpes).title).toBe('Vendor Product 1.0');
   });
 
   it('omits title when no English title exists', async () => {
@@ -92,7 +95,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     const result = await service.searchCpes({ keyword: 'vendor' }, ctx);
 
-    expect(result.cpes[0].title).toBeUndefined();
+    expect(at(result.cpes).title).toBeUndefined();
   });
 
   it('normalizes a deprecated CPE with deprecatedBy list', async () => {
@@ -115,7 +118,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     const result = await service.searchCpes({ keyword: 'apache' }, ctx);
 
-    const cpe = result.cpes[0];
+    const cpe = at(result.cpes);
     expect(cpe.deprecated).toBe(true);
     expect(cpe.deprecatedBy).toHaveLength(2);
     expect(cpe.deprecatedBy).toContain('cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*');
@@ -140,8 +143,8 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     const result = await service.searchCpes({ keyword: 'vendor' }, ctx);
 
-    expect(result.cpes[0].deprecatedBy).toHaveLength(1);
-    expect(result.cpes[0].deprecatedBy![0]).toBe('cpe:2.3:a:vendor:product:2.0:*:*:*:*:*:*:*');
+    expect(at(result.cpes).deprecatedBy).toHaveLength(1);
+    expect(at(at(result.cpes).deprecatedBy)).toBe('cpe:2.3:a:vendor:product:2.0:*:*:*:*:*:*:*');
   });
 
   it('handles a CPE with no titles array at all', async () => {
@@ -159,9 +162,9 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     const result = await service.searchCpes({ keyword: 'some_vendor' }, ctx);
 
-    expect(result.cpes[0].title).toBeUndefined();
-    expect(result.cpes[0].lastModified).toBeUndefined();
-    expect(result.cpes[0].deprecatedBy).toBeUndefined();
+    expect(at(result.cpes).title).toBeUndefined();
+    expect(at(result.cpes).lastModified).toBeUndefined();
+    expect(at(result.cpes).deprecatedBy).toBeUndefined();
   });
 
   it('handles empty products array from API', async () => {
@@ -210,7 +213,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     await service.searchCpes({ keyword: 'test', limit: 99_999 }, ctx);
 
-    const call = mockClient.get.mock.calls[0][1] as Record<string, unknown>;
+    const call = at(mockClient.get.mock.calls)[1] ?? {};
     expect(Number(call.resultsPerPage)).toBeLessThanOrEqual(10_000);
   });
 
@@ -239,8 +242,8 @@ describe('NvdCpeService — CPE normalization', () => {
     const result = await service.searchCpes({ keyword: 'unknown' }, ctx);
 
     // Falls back to empty string — caller/tool layer validates CPE format
-    expect(result.cpes[0].cpeName).toBe('');
-    expect(result.cpes[0].title).toBe('Unknown Product');
+    expect(at(result.cpes).cpeName).toBe('');
+    expect(at(result.cpes).title).toBe('Unknown Product');
   });
 
   // Issue #31: startIndex was hardcoded to 0, so nothing past the first page was reachable.
@@ -298,7 +301,7 @@ describe('NvdCpeService — CPE normalization', () => {
     const ctx = createMockContext();
     await service.searchCpes({ cpeMatchString: 'cpe:2.3:a:apache:http_server' }, ctx);
 
-    const call = mockClient.get.mock.calls[0][1] as Record<string, unknown>;
+    const call = at(mockClient.get.mock.calls)[1] ?? {};
     expect(call.cpeMatchString).toBe('cpe:2.3:a:apache:http_server');
     expect(call.keywordSearch).toBeUndefined();
   });
@@ -311,7 +314,7 @@ describe('NvdCpeService — CPE normalization', () => {
       ctx,
     );
 
-    const call = mockClient.get.mock.calls[0][1] as Record<string, unknown>;
+    const call = at(mockClient.get.mock.calls)[1] ?? {};
     expect(call.keywordSearch).toBe('apache');
     expect(call.cpeMatchString).toBe('cpe:2.3:a:apache:http_server');
   });
@@ -325,7 +328,9 @@ describe('NvdCpeService — CPE normalization', () => {
  * undeclared `nvd_request_rejected` with no recovery hint.
  */
 describe('NvdCpeService.searchCpes — NVD CPE parameter rejection (issue #45)', () => {
-  const mockClient = { get: vi.fn() };
+  const mockClient = {
+    get: vi.fn(async (_endpoint: string, _params?: Record<string, unknown>) => ({})),
+  };
 
   beforeEach(() => {
     vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
