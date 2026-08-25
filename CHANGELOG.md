@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-08-24 · ⚠️ Breaking
+
+nvd_get_cve and nvd_audit_cpe replace their configurations output field with configurationNodes — a flat array of nodes, each tagged with the group it came from — on mcp-ts-core 0.12.3.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-31 · ⚠️ Breaking
 
 weaknesses[].source and references[].source now resolve NVD's contributor identifiers to published names (e.g. CVE, CISA-ADP) instead of raw GUIDs — a breaking value-format change with no schema change to warn consumers on upgrade.
