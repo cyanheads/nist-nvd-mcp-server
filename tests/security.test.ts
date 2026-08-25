@@ -18,6 +18,7 @@ import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord, CveRecord } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 import { initNvdSourceService } from '@/services/nvd-source/nvd-source-service.js';
+import { at } from './support/at.js';
 
 // ---------------------------------------------------------------------------
 // Minimal mock data
@@ -32,7 +33,7 @@ const MINIMAL_CVE: CveRecord = {
   cvssScores: [{ version: '3.1', sourceType: 'Primary', baseScore: 10.0, severity: 'CRITICAL' }],
   severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
   weaknesses: [],
-  configurations: [],
+  configurationNodes: [],
 };
 
 const MINIMAL_BRIEF: BriefCveRecord = {
@@ -42,12 +43,14 @@ const MINIMAL_BRIEF: BriefCveRecord = {
   severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
 };
 
+type ServiceMock = ReturnType<typeof vi.fn>;
+
 function makeCveService(
   overrides: Partial<{
-    searchCves: unknown;
-    fetchById: unknown;
-    auditCpe: unknown;
-    getCveHistory: unknown;
+    searchCves: ServiceMock;
+    fetchById: ServiceMock;
+    auditCpe: ServiceMock;
+    getCveHistory: ServiceMock;
   }> = {},
 ) {
   return {
@@ -74,7 +77,7 @@ function makeCveService(
   };
 }
 
-function makeCpeService(overrides: Partial<{ searchCpes: unknown }> = {}) {
+function makeCpeService(overrides: Partial<{ searchCpes: ServiceMock }> = {}) {
   return {
     searchCpes: vi.fn().mockResolvedValue({
       cpes: [{ cpeName: 'cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*', deprecated: false }],
@@ -84,6 +87,13 @@ function makeCpeService(overrides: Partial<{ searchCpes: unknown }> = {}) {
     ...overrides,
   };
 }
+
+/** `params` is optional on a resource definition; this one declares it. */
+const resourceParams = nvdCveResource.params;
+if (!resourceParams) throw new Error('nvdCveResource must declare a params schema');
+
+/** The record shape `nvdGetCve.format()` accepts — the fixtures here are deliberately partial. */
+type GetCveRow = Parameters<NonNullable<typeof nvdGetCve.format>>[0]['cves'][number];
 
 describe('Security — injection and oversized input resistance', () => {
   let mockCveService: ReturnType<typeof makeCveService>;
@@ -138,25 +148,25 @@ describe('Security — injection and oversized input resistance', () => {
   // --- Injection in keyword search ---
 
   it('nvd_search_cves: SQL injection in keyword is accepted by schema and forwarded to service (not interpreted locally)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: "' OR '1'='1'; DROP TABLE cves;--" });
     await nvdSearchCves.handler(input, ctx);
     // The handler should not crash; the keyword is forwarded to NVD API as-is
     expect(mockCveService.searchCves).toHaveBeenCalled();
-    const params = mockCveService.searchCves.mock.calls[0][0] as Record<string, unknown>;
+    const params = at(mockCveService.searchCves.mock.calls)[0] as Record<string, unknown>;
     expect(params.keyword).toContain('DROP TABLE');
   });
 
   it('nvd_search_cves: angle-bracket injection in keyword is forwarded unmodified', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: '<script>alert(1)</script>' });
     await nvdSearchCves.handler(input, ctx);
-    const params = mockCveService.searchCves.mock.calls[0][0] as Record<string, unknown>;
+    const params = at(mockCveService.searchCves.mock.calls)[0] as Record<string, unknown>;
     expect(params.keyword).toBe('<script>alert(1)</script>');
   });
 
   it('nvd_search_cves: null-byte in keyword is passed through schema without error', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'test\0malicious' });
     // Zod accepts arbitrary strings; the service layer would handle it
     await nvdSearchCves.handler(input, ctx);
@@ -164,7 +174,7 @@ describe('Security — injection and oversized input resistance', () => {
   });
 
   it('nvd_search_cpes: CPE injection pattern in keyword forwarded to service', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'cpe:2.3:*:*:*:*:*:*:*:*:* AND 1=1' });
     await nvdSearchCpes.handler(input, ctx);
     expect(mockCpeService.searchCpes).toHaveBeenCalled();
@@ -204,7 +214,7 @@ describe('Security — injection and oversized input resistance', () => {
         data: { reason: 'invalid_cve_id_format' },
       }),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: "'; SELECT * FROM cves;--" });
     await expect(nvdGetCve.handler(input, ctx)).rejects.toThrow('Invalid CVE ID format');
   });
@@ -212,7 +222,7 @@ describe('Security — injection and oversized input resistance', () => {
   // --- Oversized inputs ---
 
   it('nvd_search_cves: limit at schema max (2000) is accepted', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'test', limit: 2000 });
     await nvdSearchCves.handler(input, ctx);
     expect(mockCveService.searchCves).toHaveBeenCalled();
@@ -223,7 +233,7 @@ describe('Security — injection and oversized input resistance', () => {
   });
 
   it('nvd_search_cpes: limit at schema max (10000) is accepted', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'apache', limit: 10_000 });
     await nvdSearchCpes.handler(input, ctx);
     expect(mockCpeService.searchCpes).toHaveBeenCalled();
@@ -262,14 +272,14 @@ describe('Security — injection and oversized input resistance', () => {
   // --- Prototype pollution probes ---
 
   it('nvd_search_cves: __proto__ in keyword is forwarded without crashing', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: '__proto__' });
     await nvdSearchCves.handler(input, ctx);
     expect(mockCveService.searchCves).toHaveBeenCalled();
   });
 
   it('nvd_search_cpes: constructor.prototype in keyword is forwarded without crashing', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: 'constructor.prototype.polluted' });
     await nvdSearchCpes.handler(input, ctx);
     expect(mockCpeService.searchCpes).toHaveBeenCalled();
@@ -305,7 +315,7 @@ describe('Security — API key and secret non-disclosure', () => {
       returned: 1,
       offset: 0,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'log4j' });
     const result = await nvdSearchCves.handler(input, ctx);
 
@@ -329,7 +339,7 @@ describe('Security — API key and secret non-disclosure', () => {
       const text = (
         nvdGetCve.format!({
           brief: false,
-          cves: [MINIMAL_CVE as unknown as Record<string, unknown>],
+          cves: [MINIMAL_CVE as unknown as GetCveRow],
         })[0] as { text: string }
       ).text;
 
@@ -372,7 +382,7 @@ describe('Security — API key and secret non-disclosure', () => {
     mockCveService.fetchById.mockRejectedValue(
       new Error(`Service error (key=${fakeApiKey}): failed`),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
 
     await expect(nvdGetCve.handler(input, ctx)).rejects.toThrow('Service error');
@@ -401,27 +411,27 @@ describe('Security — resource handler input validation', () => {
    */
   it('nvd://cve resource: path traversal attempt is rejected by CVE format validation', async () => {
     const ctx = createMockContext({ errors: nvdCveResource.errors });
-    const params = nvdCveResource.params.parse({ cveId: '../../etc/passwd' });
+    const params = resourceParams.parse({ cveId: '../../etc/passwd' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
   it('nvd://cve resource: numeric-only string is rejected as invalid format', async () => {
     const ctx = createMockContext({ errors: nvdCveResource.errors });
-    const params = nvdCveResource.params.parse({ cveId: '12345678' });
+    const params = resourceParams.parse({ cveId: '12345678' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
   it('nvd://cve resource: injection string rejected before any network call', async () => {
     const ctx = createMockContext({ errors: nvdCveResource.errors });
-    const params = nvdCveResource.params.parse({ cveId: "<script>alert('xss')</script>" });
+    const params = resourceParams.parse({ cveId: "<script>alert('xss')</script>" });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
     // Service should NOT have been called
     expect(mockCveService.fetchById).not.toHaveBeenCalled();
   });
 
   it('nvd://cve resource: valid CVE ID does reach the service', async () => {
-    const ctx = createMockContext();
-    const params = nvdCveResource.params.parse({ cveId: 'CVE-2021-44228' });
+    const ctx = createMockContext({ errors: nvdCveResource.errors });
+    const params = resourceParams.parse({ cveId: 'CVE-2021-44228' });
     await nvdCveResource.handler(params, ctx);
     expect(mockCveService.fetchById).toHaveBeenCalledOnce();
   });
@@ -454,21 +464,21 @@ describe('Security — unicode and encoding edge cases', () => {
   });
 
   it('nvd_search_cves: unicode keyword is accepted and forwarded', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'Struts アパッチ' });
     await nvdSearchCves.handler(input, ctx);
     expect(mockCveService.searchCves).toHaveBeenCalled();
   });
 
   it('nvd_search_cves: emoji in keyword is accepted by schema', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCves.errors });
     const input = nvdSearchCves.input.parse({ keyword: 'test 🚀 exploit' });
     await nvdSearchCves.handler(input, ctx);
     expect(mockCveService.searchCves).toHaveBeenCalled();
   });
 
   it('nvd_search_cpes: unicode vendor name forwarded without corruption', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
     const input = nvdSearchCpes.input.parse({ keyword: '漢字（漢字）' });
     await nvdSearchCpes.handler(input, ctx);
     expect(mockCpeService.searchCpes).toHaveBeenCalled();
@@ -617,13 +627,13 @@ describe('Security — the source dictionary rewrites only the source field', ()
       { includeReferences: true, allLanguages: false },
       createMockContext(),
     );
-    const cve = result.cves[0];
+    const cve = at(result.cves);
 
-    expect(cve.weaknesses[0].source).toBe(HOSTILE_NAME);
-    expect(cve.weaknesses[0].cweIds).toEqual(['CWE-502']);
+    expect(at(cve.weaknesses, 0).source).toBe(HOSTILE_NAME);
+    expect(at(cve.weaknesses, 0).cweIds).toEqual(['CWE-502']);
     // Every neighbouring field is byte-identical to what NVD sent for the CVE itself.
     expect(cve.cveId).toBe('CVE-2021-44228');
-    expect(cve.references?.[0]).toEqual({
+    expect(at(cve.references, 0)).toEqual({
       url: 'https://example.com/a',
       source: HOSTILE_NAME,
       tags: ['Vendor Advisory'],
@@ -638,6 +648,6 @@ describe('Security — the source dictionary rewrites only the source field', ()
       createMockContext(),
     );
 
-    expect(result.cves[0].references?.[1]).toEqual({ url: 'https://example.com/b' });
+    expect(at(at(result.cves).references, 1)).toEqual({ url: 'https://example.com/b' });
   });
 });

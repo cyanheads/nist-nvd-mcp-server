@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -15,6 +15,7 @@ import { BRIEF_DESCRIPTION_CHARS, NvdCveService } from '@/services/nvd-cve/nvd-c
 import type { CveRecord, RawCveItem, RawCveResponse } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 import * as nvdSourceServiceModule from '@/services/nvd-source/nvd-source-service.js';
+import { at } from '../support/at.js';
 
 /**
  * Source-name resolution has its own suite; every assertion here is about other fields, so the
@@ -44,14 +45,11 @@ const FULL_CVE: CveRecord = {
   ],
   severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
   weaknesses: [{ source: 'NVD', cweIds: ['CWE-20'] }],
-  configurations: [
+  configurationNodes: [
     {
-      nodes: [
-        {
-          operator: 'OR',
-          cpeMatch: [{ vulnerable: true, criteria: 'cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*' }],
-        },
-      ],
+      groupIndex: 0,
+      nodeOperator: 'OR',
+      cpeMatch: [{ vulnerable: true, criteria: 'cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*' }],
     },
   ],
   references: [
@@ -73,8 +71,14 @@ const SPARSE_CVE: CveRecord = {
   descriptions: [],
   cvssScores: [],
   weaknesses: [],
-  configurations: [],
+  configurationNodes: [],
 };
+
+/**
+ * The record shape `nvdGetCve.format()` accepts. The fixtures below are deliberately partial —
+ * each pins one rendering concern — so they are built loosely and cast to this at the boundary.
+ */
+type GetCveRow = Parameters<NonNullable<typeof nvdGetCve.format>>[0]['cves'][number];
 
 describe('nvdGetCve', () => {
   const mockService = { fetchById: vi.fn() };
@@ -93,7 +97,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -113,7 +117,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: ['CVE-2021-44228'], brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -134,7 +138,7 @@ describe('nvdGetCve', () => {
       requested: 2,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: ['CVE-2021-44228', 'CVE-2022-00001'] });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -150,7 +154,7 @@ describe('nvdGetCve', () => {
         data: { reason: 'cve_not_found' },
       }),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-9999-99999' });
     await expect(nvdGetCve.handler(input, ctx)).rejects.toThrow('CVE-9999-99999 not found');
   });
@@ -162,7 +166,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2022-00001', brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -197,7 +201,7 @@ describe('nvdGetCve', () => {
   it('formats full CVE output with key fields', () => {
     const output = {
       brief: false,
-      cves: [FULL_CVE as unknown as Record<string, unknown>],
+      cves: [FULL_CVE as unknown as GetCveRow],
     };
     const blocks = nvdGetCve.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -219,7 +223,7 @@ describe('nvdGetCve', () => {
           published: '2021-12-10T10:15:00.000',
           severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
           cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
-        } as Record<string, unknown>,
+        } as unknown as GetCveRow,
       ],
     };
     const blocks = nvdGetCve.format!(output);
@@ -237,7 +241,7 @@ describe('nvdGetCve', () => {
           cveId: 'CVE-2022-00001',
           vulnStatus: 'Awaiting Analysis',
           published: '2022-01-01T00:00:00.000',
-        } as Record<string, unknown>,
+        } as unknown as GetCveRow,
       ],
     };
     const blocks = nvdGetCve.format!(output);
@@ -254,7 +258,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', allLanguages: true });
     await nvdGetCve.handler(input, ctx);
 
@@ -272,7 +276,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
     await nvdGetCve.handler(input, ctx);
 
@@ -291,7 +295,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228' });
     await nvdGetCve.handler(input, ctx);
 
@@ -310,7 +314,7 @@ describe('nvdGetCve', () => {
     };
     const output = {
       brief: false,
-      cves: [spanishOnly as unknown as Record<string, unknown>],
+      cves: [spanishOnly as unknown as GetCveRow],
     };
     const blocks = nvdGetCve.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -331,7 +335,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -349,7 +353,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -370,7 +374,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2021-44228', brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -386,7 +390,7 @@ describe('nvdGetCve', () => {
       requested: 1,
       missingIds: [],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: 'CVE-2022-00001', brief: true });
     const result = await nvdGetCve.handler(input, ctx);
 
@@ -402,37 +406,34 @@ describe('nvdGetCve', () => {
  */
 describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
   /** `count` CPE matches in one node, so the cap boundary can be driven exactly. */
-  function cveWithMatches(count: number): Record<string, unknown> {
+  function cveWithMatches(count: number): GetCveRow {
     return {
       ...FULL_CVE,
-      configurations: [
+      configurationNodes: [
         {
-          nodes: [
-            {
-              operator: 'OR',
-              cpeMatch: Array.from({ length: count }, (_, i) => ({
-                vulnerable: true,
-                criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
-                versionEndExcluding: '2.15.0',
-              })),
-            },
-          ],
+          groupIndex: 0,
+          nodeOperator: 'OR',
+          cpeMatch: Array.from({ length: count }, (_, i) => ({
+            vulnerable: true,
+            criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
+            versionEndExcluding: '2.15.0',
+          })),
         },
       ],
-    } as unknown as Record<string, unknown>;
+    } as unknown as GetCveRow;
   }
 
-  function cveWithReferences(count: number): Record<string, unknown> {
+  function cveWithReferences(count: number): GetCveRow {
     return {
       ...FULL_CVE,
       references: Array.from({ length: count }, (_, i) => ({
         url: `https://example.invalid/advisory/${i}`,
         tags: ['Vendor Advisory'],
       })),
-    } as unknown as Record<string, unknown>;
+    } as unknown as GetCveRow;
   }
 
-  const render = (cves: Record<string, unknown>[]) =>
+  const render = (cves: GetCveRow[]) =>
     (nvdGetCve.format!({ brief: false, cves })[0] as { text: string }).text;
 
   it('renders actual CPE match criteria and version bounds, not just a group count', () => {
@@ -440,9 +441,9 @@ describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
 
     expect(text).toContain('cpe:2.3:o:fedoraproject:fedora:30:*:*:*:*:*:*:*');
     expect(text).toContain('< 2.15.0');
-    expect(text).toContain('1 node group(s), 1 CPE match(es)');
+    expect(text).toContain('1 configuration group(s), 1 node(s), 1 CPE match(es)');
     // The old formatter stopped at the group count and printed no criteria at all.
-    expect(text).not.toMatch(/\*\*Configurations:\*\* 1 node group\(s\)\s*$/m);
+    expect(text).not.toMatch(/\*\*Configurations:\*\* 1 configuration group\(s\)\s*$/m);
   });
 
   it('omits the CPE-match trailer when the count is exactly the cap', () => {
@@ -482,7 +483,7 @@ describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
         { lang: 'en', value: 'Buffer overflow in mod_lua.' },
         { lang: 'es', value: 'Desbordamiento de bufer en mod_lua.' },
       ],
-    } as unknown as Record<string, unknown>;
+    } as unknown as GetCveRow;
     const text = render([bilingual]);
 
     expect(text).toContain('Buffer overflow in mod_lua.');
@@ -493,14 +494,14 @@ describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
   });
 
   it('renders the single English description under the default language policy', () => {
-    const text = render([FULL_CVE as unknown as Record<string, unknown>]);
+    const text = render([FULL_CVE as unknown as GetCveRow]);
 
     expect(text).toContain('[en] Apache Log4j2 JNDI vulnerability.');
     expect(text).not.toContain('[es]');
   });
 
   it('renders nothing for descriptions when a record carries none', () => {
-    const text = render([SPARSE_CVE as unknown as Record<string, unknown>]);
+    const text = render([SPARSE_CVE as unknown as GetCveRow]);
 
     expect(text).toContain('CVE-2022-00001');
     expect(text).not.toContain('undefined');
@@ -629,12 +630,15 @@ describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () =
       cveIds: RAW_ITEMS.map((i) => i.id as string),
       brief: true,
     });
-    const result = await nvdGetCve.handler(input, createMockContext());
+    const result = await nvdGetCve.handler(input, createMockContext({ errors: nvdGetCve.errors }));
     return result.cves;
   }
 
   it('emits rows identical to the search surface for the same upstream payload', async () => {
-    const searched = await service.searchCves({ keyword: 'anything' }, createMockContext());
+    const searched = await service.searchCves(
+      { keyword: 'anything' },
+      createMockContext({ errors: nvdGetCve.errors }),
+    );
     const fetched = await briefRows();
 
     expect(fetched).toEqual(searched.cves);
@@ -691,11 +695,11 @@ describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () =
   it('leaves the search surface free to add filteredSeverity when a filter diverges', async () => {
     const searched = await service.searchCves(
       { severityParam: 'CRITICAL', severityVersion: 'v3' },
-      createMockContext(),
+      createMockContext({ errors: nvdGetCve.errors }),
     );
 
     // Same record, same builder — only the filter version the search surface passes differs.
-    expect(searched.cves[6].filteredSeverity).toEqual({
+    expect(at(searched.cves, 6).filteredSeverity).toEqual({
       label: 'CRITICAL',
       score: 9.8,
       fromVersion: '3.1',
@@ -711,7 +715,7 @@ describe('nvdGetCve — brief-row parity with nvd_search_cves (issue #35)', () =
  */
 describe('nvdGetCve — advertised item schema (issues #37, #38)', () => {
   const jsonSchema = (def: { output: unknown }) =>
-    toJSONSchema(def.output as never, { io: 'output', unrepresentable: 'any' }) as {
+    toJSONSchema(def.output as never, { io: 'output', unrepresentable: 'any' }) as unknown as {
       properties: { cves: { items: { properties: Record<string, unknown>; required: string[] } } };
     };
 
@@ -725,7 +729,7 @@ describe('nvdGetCve — advertised item schema (issues #37, #38)', () => {
     'cvssScores',
     'severity',
     'weaknesses',
-    'configurations',
+    'configurationNodes',
     'references',
     'cisaKev',
   ];
@@ -789,9 +793,9 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
     ...FULL_CVE,
     description: 'Truncated brief prose.',
     cisaVulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
-  } as unknown as Record<string, unknown>;
+  } as unknown as GetCveRow;
 
-  const render = (cves: Record<string, unknown>[], brief = false) =>
+  const render = (cves: GetCveRow[], brief = false) =>
     (nvdGetCve.format!({ brief, cves })[0] as { text: string }).text;
 
   it('renders both modes field sets from one sample, whatever brief says', () => {
@@ -811,7 +815,7 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
   });
 
   it('renders the weakness source alongside its CWE ids', () => {
-    expect(render([FULL_CVE as unknown as Record<string, unknown>])).toContain('NVD: CWE-20');
+    expect(render([FULL_CVE as unknown as GetCveRow])).toContain('NVD: CWE-20');
   });
 
   /**
@@ -839,7 +843,7 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
       references: [
         { url: 'https://example.invalid/a', source: 'cve@mitre.org', tags: ['Vendor Advisory'] },
       ],
-    } as unknown as Record<string, unknown>;
+    } as unknown as GetCveRow;
 
     expect(render([withSource])).toContain(
       'https://example.invalid/a [cve@mitre.org] (Vendor Advisory)',
@@ -857,5 +861,109 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
     expect(text).toContain('**Status:** Analyzed | **Published:** 2021-12-10T10:15:00.000');
     expect(text).not.toContain('Last Modified');
     expect(text).not.toContain('undefined');
+  });
+});
+
+/**
+ * Raw NVD payload through the real normalizer and out both surfaces. The tool tests above stub the
+ * service, so this is the one place the nested `configurations[].nodes[].cpeMatch[]` upstream shape
+ * is exercised end to end: the hoisted result has to parse against the advertised output schema
+ * (`structuredContent`) and render through `format()` (`content[]`) carrying the same logic.
+ */
+describe('nvdGetCve — upstream nesting reaches both surfaces intact', () => {
+  /**
+   * Two groups. The first AND-combines two nodes — (firmware- OR firmware9.0) AND hardware — which
+   * is the case a group-level flatten destroys. The second is an unqualified single node.
+   */
+  const NESTED_PAYLOAD: RawCveResponse = {
+    totalResults: 1,
+    vulnerabilities: [
+      {
+        cve: {
+          id: 'CVE-2022-1292',
+          vulnStatus: 'Analyzed',
+          published: '2022-05-03T00:00:00.000',
+          lastModified: '2023-01-01T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'c_rehash script command injection.' }],
+          configurations: [
+            {
+              operator: 'AND',
+              nodes: [
+                {
+                  operator: 'OR',
+                  cpeMatch: [
+                    {
+                      vulnerable: true,
+                      criteria: 'cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*',
+                    },
+                    {
+                      vulnerable: true,
+                      criteria: 'cpe:2.3:o:netapp:a700s_firmware:9.0:*:*:*:*:*:*:*',
+                    },
+                  ],
+                },
+                {
+                  operator: 'OR',
+                  cpeMatch: [
+                    { vulnerable: false, criteria: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*' },
+                  ],
+                },
+              ],
+            },
+            {
+              nodes: [
+                {
+                  cpeMatch: [
+                    {
+                      vulnerable: true,
+                      criteria: 'cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*',
+                      versionEndExcluding: '1.1.1o',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi.fn().mockResolvedValue(NESTED_PAYLOAD),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+  });
+
+  it('parses the hoisted nodes into structuredContent and renders them into content[]', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2022-1292' } as never);
+
+    expect(result.isError).toBeFalsy();
+
+    const nodes = (
+      result.structuredContent as {
+        cves: Array<{ configurationNodes: Array<Record<string, unknown>> }>;
+      }
+    ).cves[0]?.configurationNodes;
+
+    // Three nodes across two groups — the AND group's members stay distinguishable.
+    expect(nodes).toHaveLength(3);
+    expect(nodes?.map((n) => n.groupIndex)).toEqual([0, 0, 1]);
+    expect(at(nodes, 0)).toMatchObject({ groupOperator: 'AND', nodeOperator: 'OR' });
+    expect(at(nodes, 0).cpeMatch).toHaveLength(2);
+    expect(at(nodes, 2).groupOperator).toBeUndefined();
+    expect(at(nodes, 2).nodeOperator).toBeUndefined();
+
+    const text = (at(result.content as Array<{ text?: string }>) as { text: string }).text;
+    expect(text).toContain('2 configuration group(s), 3 node(s), 4 CPE match(es)');
+    expect(text).toContain(
+      'cpe:2.3:o:netapp:a700s_firmware:9.0:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; vulnerable component]',
+    );
+    expect(text).toContain(
+      'cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:* (< 1.1.1o) [group 1; vulnerable component]',
+    );
   });
 });

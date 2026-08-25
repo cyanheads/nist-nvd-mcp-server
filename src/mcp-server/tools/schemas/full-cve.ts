@@ -5,7 +5,7 @@
  *
  * Optionality here is load-bearing, not cosmetic: the framework parses every success return
  * against the declared output schema, so a field is required only when the normalizer assigns
- * it unconditionally. `descriptions`, `cvssScores`, `weaknesses`, and `configurations` always
+ * it unconditionally. `descriptions`, `cvssScores`, `weaknesses`, and `configurationNodes` always
  * default to `[]`; `references`, `severity`, and `cisaKev` are spread-gated upstream and stay
  * optional.
  * @module src/mcp-server/tools/schemas/full-cve
@@ -75,35 +75,36 @@ export const CveRecordSchema = z.object({
         .describe('One weakness classification entry.'),
     )
     .describe('CWE weakness classifications.'),
-  configurations: z
+  configurationNodes: z
     .array(
       z
         .object({
-          operator: z
+          groupIndex: z
+            .number()
+            .describe(
+              'Zero-based index of the NVD configuration group this node belongs to. Nodes sharing a groupIndex were siblings in one group, combined by groupOperator.',
+            ),
+          groupOperator: z
             .string()
             .optional()
             .describe(
-              'Logical operator (AND/OR) combining this group\'s sibling nodes. An "AND" means every node must match for the CVE to apply — e.g. a firmware node and the hardware it runs on. Absent when the group has nothing to combine.',
+              'Logical operator (AND/OR) combining this node with its sibling nodes in the same group. An "AND" means every node in the group must match for the CVE to apply — e.g. a firmware node and the hardware it runs on. Absent when the group has nothing to combine.',
             ),
-          nodes: z
-            .array(
-              z
-                .object({
-                  operator: z
-                    .string()
-                    .optional()
-                    .describe("Logical operator (AND/OR) combining this node's own CPE matches."),
-                  cpeMatch: z
-                    .array(CpeMatchSchema.describe('One CPE match criterion.'))
-                    .describe('CPE match criteria for this node.'),
-                })
-                .describe('One configuration node with its CPE match criteria.'),
-            )
-            .describe('Configuration nodes.'),
+          nodeOperator: z
+            .string()
+            .optional()
+            .describe(
+              "Logical operator (AND/OR) combining this node's own criteria below. Absent when the node has nothing to combine.",
+            ),
+          cpeMatch: z
+            .array(CpeMatchSchema.describe('One CPE match criterion.'))
+            .describe("This node's CPE match criteria, in the order NVD lists them."),
         })
-        .describe('One affected product configuration group.'),
+        .describe('One affected product configuration node, tagged with the group it came from.'),
     )
-    .describe('Affected product configurations.'),
+    .describe(
+      "Affected product configuration nodes. NVD nests these under configuration groups; the groups are represented by groupIndex so each node's own criteria stay together.",
+    ),
   references: z
     .array(
       z
@@ -145,5 +146,5 @@ export const CONDITIONAL_FULL_CVE_FIELDS = {
   descriptions: true,
   cvssScores: true,
   weaknesses: true,
-  configurations: true,
+  configurationNodes: true,
 } as const;

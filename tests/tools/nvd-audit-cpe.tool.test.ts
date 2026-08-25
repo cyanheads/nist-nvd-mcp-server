@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -12,6 +12,7 @@ import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import { at } from '../support/at.js';
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -30,19 +31,16 @@ const FULL_CVE: CveRecord = {
   ],
   severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
   weaknesses: [{ source: 'NVD', cweIds: ['CWE-20'] }],
-  configurations: [
+  configurationNodes: [
     {
-      nodes: [
+      groupIndex: 0,
+      nodeOperator: 'OR',
+      cpeMatch: [
         {
-          operator: 'OR',
-          cpeMatch: [
-            {
-              vulnerable: true,
-              criteria: 'cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*',
-              versionStartIncluding: '2.0',
-              versionEndExcluding: '2.15.0',
-            },
-          ],
+          vulnerable: true,
+          criteria: 'cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*',
+          versionStartIncluding: '2.0',
+          versionEndExcluding: '2.15.0',
         },
       ],
     },
@@ -70,26 +68,26 @@ const AND_GROUP_CVE: CveRecord = {
   descriptions: [{ lang: 'en', value: 'c_rehash script command injection.' }],
   cvssScores: [],
   weaknesses: [],
-  configurations: [
+  configurationNodes: [
     {
-      operator: 'AND',
-      nodes: [
-        {
-          operator: 'OR',
-          cpeMatch: [
-            { vulnerable: true, criteria: 'cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*' },
-          ],
-        },
-        {
-          operator: 'OR',
-          cpeMatch: [{ vulnerable: false, criteria: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*' }],
-        },
+      groupIndex: 0,
+      groupOperator: 'AND',
+      nodeOperator: 'OR',
+      cpeMatch: [
+        { vulnerable: true, criteria: 'cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*' },
+        { vulnerable: true, criteria: 'cpe:2.3:o:netapp:a700s_firmware:9.0:*:*:*:*:*:*:*' },
       ],
+    },
+    {
+      groupIndex: 0,
+      groupOperator: 'AND',
+      nodeOperator: 'OR',
+      cpeMatch: [{ vulnerable: false, criteria: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*' }],
     },
   ],
 };
 
-/** Eight CPE matches in one node — two past the five-per-CVE render cap. */
+/** Eight CPE matches split across two nodes of one group — three past the render cap. */
 const MANY_MATCH_CVE: CveRecord = {
   cveId: 'CVE-2021-44224',
   vulnStatus: 'Analyzed',
@@ -98,17 +96,22 @@ const MANY_MATCH_CVE: CveRecord = {
   descriptions: [],
   cvssScores: [],
   weaknesses: [],
-  configurations: [
+  configurationNodes: [
     {
-      nodes: [
-        {
-          operator: 'OR',
-          cpeMatch: Array.from({ length: 8 }, (_, i) => ({
-            vulnerable: true,
-            criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
-          })),
-        },
-      ],
+      groupIndex: 0,
+      nodeOperator: 'OR',
+      cpeMatch: Array.from({ length: 3 }, (_, i) => ({
+        vulnerable: true,
+        criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
+      })),
+    },
+    {
+      groupIndex: 1,
+      nodeOperator: 'OR',
+      cpeMatch: Array.from({ length: 5 }, (_, i) => ({
+        vulnerable: true,
+        criteria: `cpe:2.3:o:fedoraproject:fedora:${33 + i}:*:*:*:*:*:*:*`,
+      })),
     },
   ],
 };
@@ -121,7 +124,7 @@ const SPARSE_CVE: CveRecord = {
   descriptions: [],
   cvssScores: [],
   weaknesses: [],
-  configurations: [],
+  configurationNodes: [],
 };
 
 function makeAuditResult(
@@ -149,14 +152,14 @@ describe('nvdAuditCpe', () => {
 
   it('returns CVEs and enrichment for a valid cpeName', async () => {
     mockService.auditCpe.mockResolvedValue(makeAuditResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
     });
     const result = await nvdAuditCpe.handler(input, ctx);
 
     expect(result.cves).toHaveLength(1);
-    expect(result.cves[0].cveId).toBe('CVE-2021-44228');
+    expect(at(result.cves, 0).cveId).toBe('CVE-2021-44228');
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(1);
@@ -169,7 +172,7 @@ describe('nvdAuditCpe', () => {
         virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
       }),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
     });
@@ -231,14 +234,14 @@ describe('nvdAuditCpe', () => {
         virtualMatchString: 'cpe:2.3:a:some_vendor:product:*',
       }),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:some_vendor:product:*',
     });
     const result = await nvdAuditCpe.handler(input, ctx);
 
-    expect(result.cves[0].severity).toBeUndefined();
-    expect(result.cves[0].references).toBeUndefined();
+    expect(at(result.cves, 0).severity).toBeUndefined();
+    expect(at(result.cves, 0).references).toBeUndefined();
   });
 
   it('formats audit results with CVE IDs and severity', () => {
@@ -261,29 +264,42 @@ describe('nvdAuditCpe', () => {
     expect(text).toContain('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*');
     expect(text).toContain('>= 2.0');
     expect(text).toContain('< 2.15.0');
-    expect(text).toContain('1 node group(s), 1 CPE match(es)');
+    expect(text).toContain('1 configuration group(s), 1 node(s), 1 CPE match(es)');
     // The operator now qualifies a real criteria line rather than standing alone.
     expect(text).not.toMatch(/^\s*-\s*Operator:/m);
   });
 
-  it('renders the group-level operator and flags non-vulnerable context matches', () => {
+  it('renders both operators and the group index, and flags non-vulnerable context matches', () => {
     const blocks = nvdAuditCpe.format!({ cves: [AND_GROUP_CVE] });
     const text = (blocks[0] as { text: string }).text;
 
+    // Two AND-combined nodes, three criteria: (firmware- OR firmware9.0) AND hardware.
+    expect(text).toContain('1 configuration group(s), 2 node(s), 3 CPE match(es)');
     expect(text).toContain('cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*');
-    // The AND is what marks the two nodes as jointly required rather than alternatives.
-    expect(text).toContain('AND with sibling nodes');
-    expect(text).toContain('not the vulnerable component');
+    // The group AND marks the two nodes as jointly required; the node OR combines the two
+    // firmware criteria as alternatives. Both, plus the shared group, must reach content[].
+    expect(text).toContain(
+      '[group 0; AND with sibling nodes; OR within node; vulnerable component]',
+    );
+    expect(text).toContain(
+      'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
+    );
   });
 
-  it('caps CPE matches at five per CVE and trails with the omitted count', () => {
+  it('caps CPE matches at five per CVE across nodes and trails with the omitted count', () => {
     const blocks = nvdAuditCpe.format!({ cves: [MANY_MATCH_CVE] });
     const text = (blocks[0] as { text: string }).text;
 
-    expect(text).toContain('1 node group(s), 8 CPE match(es)');
+    expect(text).toContain('2 configuration group(s), 2 node(s), 8 CPE match(es)');
+    /**
+     * The cap falls inside the second node — three criteria from group 0, two from group 1 — so
+     * the trailer count has to be computed over the flattened criteria, not per node.
+     */
     expect(text).toContain('… 3 more');
     expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(5);
+    expect(text).toContain('cpe:2.3:o:fedoraproject:fedora:34:*:*:*:*:*:*:* [group 1');
     // The trailer names what was dropped — the last three are not silently missing.
+    expect(text).not.toContain('fedora:35');
     expect(text).not.toContain('fedora:37');
   });
 
@@ -337,7 +353,7 @@ describe('nvdAuditCpe', () => {
       offset: 0,
       cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:fake:product:1.0:*:*:*:*:*:*:*',
     });
@@ -358,7 +374,7 @@ describe('nvdAuditCpe', () => {
       filteredCount: 3,
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
       severityMin: 'CRITICAL',
@@ -386,7 +402,7 @@ describe('nvdAuditCpe', () => {
       filteredCount: 2,
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
       severityMin: 'HIGH',
@@ -409,7 +425,7 @@ describe('nvdAuditCpe', () => {
       filteredCount: 0,
       virtualMatchString: 'cpe:2.3:a:nonexistent:product:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:nonexistent:product:*',
       severityMin: 'HIGH',
@@ -422,7 +438,7 @@ describe('nvdAuditCpe', () => {
 
   it('omits severityMin and filteredCount enrichment when no severityMin was set', async () => {
     mockService.auditCpe.mockResolvedValue(makeAuditResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
     });
@@ -436,7 +452,7 @@ describe('nvdAuditCpe', () => {
   // Issue #23: allLanguages must reach the service, not sit as a dead input.
   it('threads allLanguages through to the service when set', async () => {
     mockService.auditCpe.mockResolvedValue(makeAuditResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
       allLanguages: true,
@@ -462,7 +478,7 @@ describe('nvdAuditCpe', () => {
         offset: 300,
       }),
     );
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
       limit: 2,
@@ -478,7 +494,7 @@ describe('nvdAuditCpe', () => {
 
   it('defaults offset to 0 when omitted', async () => {
     mockService.auditCpe.mockResolvedValue(makeAuditResult());
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
     });
@@ -498,7 +514,7 @@ describe('nvdAuditCpe', () => {
       filteredCount: 0,
       virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
       offset: 5000,
@@ -521,7 +537,7 @@ describe('nvdAuditCpe', () => {
       filteredCount: 3,
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       cpeName: 'cpe:2.3:a:some:product:1.0:*:*:*:*:*:*:*',
       severityMin: 'CRITICAL',
@@ -571,14 +587,15 @@ describe('nvdAuditCpe — empty-page notices (issue #34)', () => {
       filteredCount: extra.filteredCount ?? 0,
       ...target,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     const input = nvdAuditCpe.input.parse({
       ...target,
       offset,
       ...(extra.severityMin && { severityMin: extra.severityMin }),
     });
     await nvdAuditCpe.handler(input, ctx);
-    return getEnrichment(ctx).notice;
+    const { notice } = getEnrichment(ctx);
+    return typeof notice === 'string' ? notice : undefined;
   }
 
   it('blames the offset only once it has reached totalCount', async () => {
@@ -684,7 +701,7 @@ describe('nvdAuditCpe — next-page notice (issue #36)', () => {
       filteredCount,
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     await nvdAuditCpe.handler(
       nvdAuditCpe.input.parse({
         cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
@@ -693,7 +710,8 @@ describe('nvdAuditCpe — next-page notice (issue #36)', () => {
       }),
       ctx,
     );
-    return getEnrichment(ctx).notice;
+    const { notice } = getEnrichment(ctx);
+    return typeof notice === 'string' ? notice : undefined;
   }
 
   it('names the next page offset on a partial first page', async () => {
@@ -747,7 +765,7 @@ describe('nvdAuditCpe — next-page notice (issue #36)', () => {
       filteredCount: 0,
       cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     await nvdAuditCpe.handler(
       nvdAuditCpe.input.parse({
         cpeName: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*',
@@ -811,7 +829,7 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
       cves: Array.from({ length: returned }, () => FULL_CVE),
       virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
     await nvdAuditCpe.handler(
       nvdAuditCpe.input.parse({
         virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
@@ -840,7 +858,10 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
  */
 describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
   const item = (
-    toJSONSchema(nvdAuditCpe.output as never, { io: 'output', unrepresentable: 'any' }) as {
+    toJSONSchema(nvdAuditCpe.output as never, {
+      io: 'output',
+      unrepresentable: 'any',
+    }) as unknown as {
       properties: { cves: { items: { properties: Record<string, unknown>; required: string[] } } };
     }
   ).properties.cves.items;
@@ -855,7 +876,7 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
       'cvssScores',
       'severity',
       'weaknesses',
-      'configurations',
+      'configurationNodes',
       'references',
       'cisaKev',
     ]);
@@ -871,7 +892,7 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
       'descriptions',
       'cvssScores',
       'weaknesses',
-      'configurations',
+      'configurationNodes',
     ]);
   });
 });
@@ -919,5 +940,52 @@ describe('nvdAuditCpe — NVD CPE rejection carries the declared contract (issue
     const entry = nvdAuditCpe.errors?.find((e) => e.reason === 'invalid_cpe_format');
     expect(entry?.when).toContain('cpe:2.3:');
     expect(entry?.when).toContain('NVD rejected');
+  });
+});
+
+/**
+ * Both surfaces at once, through the real `tools/call` path: `structuredContent` is parsed against
+ * the advertised output schema, and `content[]` comes from `format()`. A client reading either one
+ * has to be able to reconstruct the same applicability logic, so the node boundaries and the group
+ * they belong to are asserted on both.
+ */
+describe('nvdAuditCpe — configuration nodes reach structuredContent and content[]', () => {
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      auditCpe: vi.fn().mockResolvedValue(
+        makeAuditResult([AND_GROUP_CVE], {
+          cpeName: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*',
+          filteredCount: 0,
+        }),
+      ),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+  });
+
+  it('carries each node whole, tagged with its group, on both surfaces', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*',
+    } as never);
+
+    expect(result.isError).toBeFalsy();
+
+    const nodes = (
+      result.structuredContent as {
+        cves: Array<{ configurationNodes: Array<Record<string, unknown>> }>;
+      }
+    ).cves[0]?.configurationNodes;
+
+    // Two nodes, not one merged array: the group's AND joins nodes, so a single array of three
+    // criteria would read as three ANDed products rather than (firmware OR firmware) AND hardware.
+    expect(nodes).toHaveLength(2);
+    expect(at(nodes, 0)).toMatchObject({ groupIndex: 0, groupOperator: 'AND', nodeOperator: 'OR' });
+    expect(at(nodes, 0).cpeMatch).toHaveLength(2);
+    expect(at(nodes, 1)).toMatchObject({ groupIndex: 0, groupOperator: 'AND', nodeOperator: 'OR' });
+    expect(at(nodes, 1).cpeMatch).toHaveLength(1);
+
+    const text = (at(result.content as Array<{ text?: string }>) as { text: string }).text;
+    expect(text).toContain('1 configuration group(s), 2 node(s), 3 CPE match(es)');
+    expect(text).toContain(
+      'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
+    );
   });
 });

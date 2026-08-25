@@ -5,7 +5,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
+import {
+  CPE_MATCH_CAP,
+  flattenCpeMatches,
+  summarizeCpeNodes,
+} from '@/mcp-server/tools/formatting/cpe-match.js';
 import { UnfilteredBriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
 import {
   CONDITIONAL_FULL_CVE_FIELDS,
@@ -222,11 +226,9 @@ export const nvdGetCve = tool('nvd_get_cve', {
         }
       }
 
-      if (cve.configurations && cve.configurations.length > 0) {
-        const matches = flattenCpeMatches(cve.configurations);
-        lines.push(
-          `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
-        );
+      if (cve.configurationNodes && cve.configurationNodes.length > 0) {
+        const matches = flattenCpeMatches(cve.configurationNodes);
+        lines.push(`**Configurations:** ${summarizeCpeNodes(cve.configurationNodes)}`);
         for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
         if (matches.length > CPE_MATCH_CAP) {
           lines.push(

@@ -145,20 +145,27 @@ export interface CisaKev {
  */
 export type CveRecord = {
   cisaKev?: CisaKev;
-  configurations: Array<{
-    /** Combines this group's sibling nodes — an `AND` means every node must match. */
-    operator?: string;
-    nodes: Array<{
-      /** Combines this node's own cpeMatch entries. */
-      operator?: string;
-      cpeMatch: Array<{
-        vulnerable: boolean;
-        criteria: string;
-        versionStartIncluding?: string;
-        versionStartExcluding?: string;
-        versionEndIncluding?: string;
-        versionEndExcluding?: string;
-      }>;
+  /**
+   * Upstream's `configurations[].nodes[]` with the group level hoisted away: one entry per node,
+   * tagged with the index of the group it came from. Node boundaries are the applicability
+   * semantics — a group's `AND` combines whole nodes, not individual criteria — so the node stays
+   * the entry and `groupIndex` carries the membership a flattened group array would destroy.
+   */
+  configurationNodes: Array<{
+    /** Zero-based index of the upstream group this node came from. Siblings share it. */
+    groupIndex: number;
+    /** Combines the group's sibling nodes — an `AND` means every node must match. */
+    groupOperator?: string;
+    /** Combines this node's own criteria. */
+    nodeOperator?: string;
+    /** This node's criteria, in upstream order. */
+    cpeMatch: Array<{
+      vulnerable: boolean;
+      criteria: string;
+      versionStartIncluding?: string;
+      versionStartExcluding?: string;
+      versionEndIncluding?: string;
+      versionEndExcluding?: string;
     }>;
   }>;
   cveId: string;

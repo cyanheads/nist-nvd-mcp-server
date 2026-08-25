@@ -5,7 +5,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { CPE_MATCH_CAP, flattenCpeMatches } from '@/mcp-server/tools/formatting/cpe-match.js';
+import {
+  CPE_MATCH_CAP,
+  flattenCpeMatches,
+  summarizeCpeNodes,
+} from '@/mcp-server/tools/formatting/cpe-match.js';
 import { CveRecordSchema } from '@/mcp-server/tools/schemas/full-cve.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
@@ -330,11 +334,9 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         lines.push(`  - Required Action: ${cve.cisaKev.requiredAction}`);
       }
 
-      if (cve.configurations && cve.configurations.length > 0) {
-        const matches = flattenCpeMatches(cve.configurations);
-        lines.push(
-          `**Configurations:** ${cve.configurations.length} node group(s), ${matches.length} CPE match(es)`,
-        );
+      if (cve.configurationNodes && cve.configurationNodes.length > 0) {
+        const matches = flattenCpeMatches(cve.configurationNodes);
+        lines.push(`**Configurations:** ${summarizeCpeNodes(cve.configurationNodes)}`);
         for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
         if (matches.length > CPE_MATCH_CAP) {
           lines.push(`  - … ${matches.length - CPE_MATCH_CAP} more`);
