@@ -3,8 +3,14 @@
 #
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
+#
+# Pinned to the builder's own platform. The build emits portable JavaScript, so
+# there is nothing to gain from running it once per target architecture — and
+# under a multi-arch build the emulated leg is actively broken: Bun 1.4.0 aborts
+# with SIGABRT inside qemu, so `bun run build` dies before it compiles anything.
+# The production stage below stays per-target and resolves its own dependencies.
 # ==============================================================================
-FROM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
 WORKDIR /usr/src/app
 
