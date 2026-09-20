@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-20
+
+Adopts mcp-ts-core ^0.13.6: argument rejections classify InvalidParams with a recovery hint, caller disconnects classify RequestCancelled, and the public hosted endpoint is now published in server.json and the README.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-08-24 · ⚠️ Breaking
 
 nvd_get_cve and nvd_audit_cpe replace their configurations output field with configurationNodes — a flat array of nodes, each tagged with the group it came from — on mcp-ts-core 0.12.3.
