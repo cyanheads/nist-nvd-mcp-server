@@ -209,7 +209,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 NVD_API_KEY=... bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - Optional: [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) — free, raises rate limit from 5 req/30s to 50 req/30s.
 
 ### Installation
