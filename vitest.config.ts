@@ -4,6 +4,10 @@
  * `--project <name>` as the surface grows. Extends the framework's base config
  * for shared `resolve`, `ssr`, and coverage settings.
  *
+ * `vitest` is held at 4.x (allowlisted in `devcheck.config.json` `outdated`): the
+ * imported base config is authored against Vitest 4, so the major moves with the
+ * framework, not ahead of it.
+ *
  * @module vitest.config
  */
 

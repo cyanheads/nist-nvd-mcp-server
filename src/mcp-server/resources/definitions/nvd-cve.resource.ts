@@ -39,6 +39,7 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
        */
       reason: 'cve_not_found',
       code: JsonRpcErrorCode.NotFound,
+      thrownBy: 'service',
       when: 'The CVE ID is well-formed but NVD holds no record for it.',
       recovery:
         'Verify the CVE ID is correct, or use nvd_search_cves to find it by keyword or date range.',

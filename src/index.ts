@@ -23,6 +23,11 @@ import { initNvdSourceService } from './services/nvd-source/nvd-source-service.j
 await createApp({
   name: 'nist-nvd-mcp-server',
   title: 'nist-nvd-mcp-server',
+  /**
+   * Every tool here is a read-only NVD lookup — no handler calls `ctx.requestInput`,
+   * so nothing needs a session to come back to. `MCP_SESSION_MODE` still overrides.
+   */
+  sessionMode: 'stateless',
   tools: [nvdGetCve, nvdSearchCves, nvdAuditCpe, nvdSearchCpes, nvdGetCveHistory],
   resources: [nvdCveResource],
   prompts: [],

@@ -116,12 +116,16 @@ export const nvdGetCve = tool('nvd_get_cve', {
       reason: 'invalid_cve_id_format',
       code: JsonRpcErrorCode.ValidationError,
       when: 'One or more CVE IDs fail format validation (NVD returns HTTP 404 for malformed IDs).',
+      /** Raised by the CVE service during ID validation, below this handler. */
+      thrownBy: 'service',
       recovery: 'Use the format CVE-YYYY-NNNNN (e.g., CVE-2021-44228) and verify each ID.',
     },
     {
       reason: 'cve_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A valid-format CVE ID returns no results — the ID is well-formed but does not exist in NVD.',
+      /** Raised by the CVE service when NVD returns no records, below this handler. */
+      thrownBy: 'service',
       recovery: 'Verify the CVE ID is correct; use nvd_search_cves to search by keyword or date.',
     },
     {
@@ -129,6 +133,8 @@ export const nvdGetCve = tool('nvd_get_cve', {
       code: JsonRpcErrorCode.RateLimited,
       when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
       retryable: true,
+      /** Raised by the HTTP client on NVD's 403, below this handler. */
+      thrownBy: 'service',
       recovery:
         'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
     },

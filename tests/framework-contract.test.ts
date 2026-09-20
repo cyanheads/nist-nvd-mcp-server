@@ -8,9 +8,14 @@
  * caller as a tool result rather than a JSON-RPC error — so a client reading `content[]` can see
  * which key it got wrong.
  *
+ * An argument rejection classifies `InvalidParams` (-32602) with `data.reason: 'invalid_arguments'`,
+ * which is what separates it from a declared contract failure carrying the tool's own code and
+ * reason. Both are asserted below so the two stay distinguishable to a client that branches on them.
+ *
  * @module tests/framework-contract.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -131,7 +136,11 @@ describe('a rejection is a tool result, not a JSON-RPC error', () => {
     // 0.12.0 moved the error envelope into the advertised output schema — a client that parses
     // structuredContent against it must find the failure there, not as a transport-level error.
     expect(result.structuredContent).toMatchObject({
-      error: { code: expect.any(Number), message: expect.stringContaining('notAParameter') },
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        message: expect.stringContaining('notAParameter'),
+        data: { reason: 'invalid_arguments' },
+      },
     });
   });
 
