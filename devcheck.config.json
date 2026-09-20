@@ -12,7 +12,7 @@
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": ["typescript", "vitest"]
+    "allowlist": ["typescript"]
   },
   "lint": {},
   "packaging": {
