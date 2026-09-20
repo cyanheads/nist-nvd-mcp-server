@@ -27,9 +27,11 @@
 
 ---
 
-## Tools
+## Overview
 
-Five tools for vulnerability research, CPE auditing, and change tracking against the NIST NVD API 2.0:
+CVE and CPE data from the NIST National Vulnerability Database. Search and audit vulnerabilities by keyword, severity, CWE, or CISA KEV status, resolve products to CPE names, and track a CVE's revision history from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:-----|:------------|
@@ -39,105 +41,107 @@ Five tools for vulnerability research, CPE auditing, and change tracking against
 | `nvd_audit_cpe` | Find all CVEs affecting a specific product version by CPE name or virtual match string. |
 | `nvd_get_cve_history` | Retrieve the change history for a CVE — score revisions, status transitions, and reference additions. |
 
-### `nvd_search_cves`
+### Resources
 
-The primary discovery tool for vulnerability surveillance and triage workflows.
-
-- Full-text keyword search across CVE descriptions (AND-semantics across words), or `exactPhrase: true` to match the keyword as a phrase
-- Severity filter by CVSS v2/v3/v4 label (LOW, MEDIUM, HIGH, CRITICAL)
-- CWE weakness filter (e.g., `CWE-79`, `NVD-CWE-Other`)
-- CISA KEV filter — limit results to known-exploited vulnerabilities
-- Convenience date shorthands: `pubDays` and `lastModDays` for "last N days" queries
-- Explicit ISO 8601 date range parameters (`pubStartDate`/`pubEndDate`, etc.) with 120-day max span
-- Auto-clamps convenience date params that exceed 120 days and reports clamped values in the response enrichment
-- Pagination via `limit` (up to 2000) and `offset`
-- Every row carries a truncated description alongside the ID, so results are distinguishable without a follow-up fetch
-- Results are always brief; call `nvd_get_cve` for full detail
-
----
-
-### `nvd_get_cve`
-
-Fetch one or more CVEs by ID with full detail or brief summaries.
-
-- Batch up to 100 CVE IDs per call
-- Full mode: all CVSS scores across v2.0, v3.0, v3.1, and v4.0; CWE weaknesses; CPE configurations; CISA KEV fields; references
-- Brief mode (`brief: true`): ID, status, top severity, KEV name, truncated description — recommended for batches larger than 10
-- `includeReferences: false` to strip the references array and reduce response size
-- Per-ID parity check: the `missingIds` enrichment field lists any requested IDs NVD didn't return
-- Rendered text carries the affected-product criteria and references the record holds, capped with a `… N more` trailer; `allLanguages: true` renders every localized description, not just English
-
----
-
-### `nvd_search_cpes`
-
-Look up product identifiers before auditing.
-
-- Keyword search (e.g., `"apache http server"`, `"openssl"`) or partial CPEv2.3 pattern
-- Returns full CPE name, human-readable title, deprecation status, and superseding CPEs
-- Pagination via `limit` (up to 10,000 per page) and `offset` — a vendor-level keyword can match tens of thousands of entries, so page with `offset` rather than trying to narrow further
-- Use this before `nvd_audit_cpe` — CPE names are arcane strings; guessing audits the wrong product
-
----
-
-### `nvd_audit_cpe`
-
-Full CVE audit for a specific product version.
-
-- Two modes: exact `cpeName` (NVD auto-applies `isVulnerable`) or `virtualMatchString` with optional version range bounds
-- Version range via `versionStart`/`versionEnd` with inclusive/exclusive type control
-- Client-side severity filter (`severityMin`) to strip low-signal entries
-- Returns full CVE records (ID, CVSS scores, CWE, CPE configurations, KEV fields, references)
-- Pagination via `limit` (up to 2000) and `offset` — page at a modest `limit` instead of raising it, since each result is a full record
-- Echoes the CPE identifier used in the response enrichment so callers can verify the correct product was queried
-
----
-
-### `nvd_get_cve_history`
-
-Track a CVE's lifecycle over time.
-
-- Returns change events: CVSS revisions, status transitions, reference additions, CPE configuration updates
-- `order` picks which end to read from — `newest` (default) returns the most recent events first, `oldest` returns NVD's native oldest-first order
-- Paginated via `limit` and `offset`, where `offset` counts from the end `order` anchors to
-- Note: the NVD history endpoint is significantly slower without an API key — set `NVD_API_KEY` and raise `NVD_REQUEST_TIMEOUT_MS` for reliable operation
-
-## Resource
-
-| Type | Name | Description |
-|:-----|:-----|:------------|
-| Resource | `nvd://cve/{cveId}` | Full CVE record by ID — same data as `nvd_get_cve` for a single ID, as a stable URI for injectable context. |
+| Resource | Description |
+|:---------|:------------|
+| `nvd://cve/{cveId}` | Full CVE record by ID — same data as `nvd_get_cve` for a single ID, as a stable URI for injectable context. |
 
 All resource data is also reachable via tools.
 
+## Capability reference
+
+### `nvd_search_cves` <sub>tool</sub>
+
+- Full-text keyword search (AND-semantics across words), or `exactPhrase: true` for an exact-phrase match — requires `keyword`
+- Filters: CVSS severity band (LOW/MEDIUM/HIGH/CRITICAL — CRITICAL requires `severityVersion: "v3"` or `"v4"`), CWE ID, CISA KEV status, `noRejected` (default true)
+- Date filters: `pubDays`/`lastModDays` convenience shorthands (auto-clamped to 120 days, clamping reported in the enrichment) or explicit ISO 8601 ranges (120-day max span, both ends required); the two forms per axis are mutually exclusive
+- Pagination via `limit` (up to 2000, default 20) and `offset`
+- Always returns brief summaries with a truncated description; call `nvd_get_cve` for full detail
+
+---
+
+### `nvd_get_cve` <sub>tool</sub>
+
+- Batch up to 100 CVE IDs per call
+- Full mode (default): CVSS scores across v2.0/v3.0/v3.1/v4.0, CWE weaknesses, CPE configurations, CISA KEV fields, references
+- `brief: true` returns trimmed rows (ID, status, top severity, KEV name, truncated description) — recommended for batches over 10
+- `includeReferences: false` strips the references array; `allLanguages: true` renders every localized description instead of English-only
+- `missingIds` enrichment field lists any requested IDs NVD didn't return
+- Rendered text caps references at 15 per record, with a `… N more` trailer
+
+---
+
+### `nvd_search_cpes` <sub>tool</sub>
+
+- Keyword search (e.g. `"apache http server"`) or a partial CPEv2.3 pattern via `cpeMatchString` — at least one required
+- Returns full CPE name, human-readable title, deprecation status, and superseding CPEs
+- Pagination via `limit` (up to 10,000, default 20) and `offset` — a vendor-level keyword can match tens of thousands of entries, so page rather than narrowing further
+- Use before `nvd_audit_cpe` to resolve the exact CPE name a product needs
+
+---
+
+### `nvd_audit_cpe` <sub>tool</sub>
+
+- Two modes: exact `cpeName` (NVD auto-applies `isVulnerable`) or `virtualMatchString` with optional `versionStart`/`versionEnd` bounds (inclusive/exclusive)
+- Client-side `severityMin` filter drops low-signal entries from the fetched page — it can only remove what `limit` already retrieved
+- Returns full CVE records (CVSS scores, CWE, CPE configurations, KEV fields, references)
+- Pagination via `limit` (up to 2000, default 20) and `offset` — page at a modest limit rather than raising it, since each result is a full record
+- `auditTarget` enrichment field echoes the CPE identifier used, so callers can verify the correct product was queried
+
+---
+
+### `nvd_get_cve_history` <sub>tool</sub>
+
+- Returns change events: CVSS revisions, status transitions, reference additions, CPE configuration updates
+- `order` picks the anchor end — `newest` (default) reads most-recent-first, `oldest` reads NVD's native order
+- Paginated via `limit` (up to 2000, default 20) and `offset`, counted from the end `order` anchors to
+- The history endpoint is markedly slower without an API key — set `NVD_API_KEY` and raise `NVD_REQUEST_TIMEOUT_MS`
+
+---
+
+### `nvd://cve/{cveId}` <sub>resource</sub>
+
+- Full CVE record as `application/json` — same data as `nvd_get_cve` for one ID, with references and English-only descriptions
+- `cveId` must match `CVE-YYYY-NNNNN`; a well-formed but unknown ID throws `cve_not_found`
+
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool, resource, and prompt definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 NVD-specific:
 
 - Request pacer enforces NVD's 5 req/30s (no key) and 50 req/30s (with key) limits with automatic queuing, at a minimum inter-request gap derived from the window and limit
 - Retry wraps the pacer rather than sitting inside it — every attempt takes its own turn in the queue, so retries count against the rate budget instead of bursting past it
-- A 403's `Retry-After` holds the whole queue until NVD's window resets. Keyless, a 403 fails fast and names `NVD_API_KEY` rather than spending a 5-request budget on retries that cannot outlast a 30-second window
-- Deterministic rejections fail fast instead of consuming retries. NVD answers both a bad parameter and a refused API key with HTTP 404, separated only by a `message` header — a refused key surfaces as a config fault naming `NVD_API_KEY` rather than as a malformed CVE ID
-- HTML-response guard catches NVD rate-limit pages served as HTML instead of 403
+- A 403's `Retry-After` holds the whole queue until NVD's window resets; keyless, a 403 fails fast and names `NVD_API_KEY` rather than spending the 5-request budget on retries that cannot outlast a 30-second window
+- Deterministic rejections fail fast instead of consuming retries — NVD answers both a bad parameter and a refused API key with HTTP 404, separated only by a `message` header, so a refused key surfaces as a config fault naming `NVD_API_KEY` rather than as a malformed CVE ID
+- HTML-response guard catches NVD rate-limit pages served as HTML instead of a 403
 
 Agent-friendly output:
 
 - An `enrichment` block on every response, carried on both `structuredContent` and the rendered text — total results, returned count, page offset, the filters actually applied, and any date-clamping events, so agents can reason about what was really queried
-- `missingIds` in batch CVE lookups — per-ID parity check instead of a silent partial result
+- `missingIds` in batch CVE lookups — a per-ID parity check instead of a silent partial result
 - CPE echo in audit responses — `cpeName` or `virtualMatchString` reflected back so callers can verify the correct product was audited
-- Empty-result notices that name the cause — an unmatched query, a severity threshold that emptied the page, and an offset past the end of the result set are told apart rather than all reading as "nothing found"
-- An audit that finds nothing is a result, not an error — a product with no CVEs in NVD returns an empty page with `totalCount: 0` on either input arm, so "no known vulnerabilities" reads as the answer it is
+- Empty-result notices that name the cause — an unmatched query, a severity threshold that emptied the page, an offset past the end of the result set, and a clean audit ("no known vulnerabilities") are told apart rather than all reading as errors or "nothing found"
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://nist-nvd.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "nist-nvd-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://nist-nvd.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
@@ -308,7 +312,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
