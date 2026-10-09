@@ -925,13 +925,16 @@ describe('nvdAuditCpe — NVD CPE rejection carries the declared contract (issue
         ),
     } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
 
-    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
-    const input = nvdAuditCpe.input.parse({ cpeName: 'cpe:2.3:a:zzznotavendor' });
+    // Through the contract boundary: the declared recovery is filled there, not at the throw site.
+    const result = await runToolContract(nvdAuditCpe, { cpeName: 'cpe:2.3:a:zzznotavendor' });
 
-    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'invalid_cpe_format',
-        recovery: { hint: expect.stringContaining('nvd_search_cpes') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'invalid_cpe_format',
+          recovery: { hint: expect.stringContaining('nvd_search_cpes') },
+        },
       },
     });
   });

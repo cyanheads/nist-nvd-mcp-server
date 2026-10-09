@@ -168,24 +168,18 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   async handler(input, ctx) {
     // Validate inputs
     if (!input.cpeName && !input.virtualMatchString) {
-      throw ctx.fail(
-        'missing_cpe_input',
-        'Either cpeName or virtualMatchString is required.',
-        ctx.recoveryFor('missing_cpe_input'),
-      );
+      throw ctx.fail('missing_cpe_input', 'Either cpeName or virtualMatchString is required.');
     }
     if (input.cpeName && input.virtualMatchString) {
       throw ctx.fail(
         'conflicting_cpe_inputs',
         'Provide only one of cpeName or virtualMatchString, not both.',
-        ctx.recoveryFor('conflicting_cpe_inputs'),
       );
     }
     if ((input.versionStart || input.versionEnd) && !input.virtualMatchString) {
       throw ctx.fail(
         'version_range_without_match_string',
         'versionStart/versionEnd require virtualMatchString.',
-        ctx.recoveryFor('version_range_without_match_string'),
       );
     }
 
@@ -193,14 +187,12 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       throw ctx.fail(
         'invalid_cpe_format',
         `Invalid CPE name: "${input.cpeName}". CPEv2.3 names must start with "cpe:2.3:".`,
-        ctx.recoveryFor('invalid_cpe_format'),
       );
     }
     if (input.virtualMatchString && !CPE_V23_REGEX.test(input.virtualMatchString)) {
       throw ctx.fail(
         'invalid_cpe_format',
         `Invalid CPE string: "${input.virtualMatchString}". CPEv2.3 strings must start with "cpe:2.3:".`,
-        ctx.recoveryFor('invalid_cpe_format'),
       );
     }
 

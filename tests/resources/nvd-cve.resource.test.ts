@@ -38,6 +38,11 @@ const FULL_CVE: CveRecord = {
 const resourceParams = nvdCveResource.params;
 if (!resourceParams) throw new Error('nvdCveResource must declare a params schema');
 
+/** The `recovery` text the resource declares for `reason` — what the framework puts on the wire. */
+function declaredRecovery(reason: string): string | undefined {
+  return nvdCveResource.errors?.find((e) => e.reason === reason)?.recovery;
+}
+
 describe('nvdCveResource', () => {
   const mockService = { fetchById: vi.fn() };
 
@@ -93,16 +98,18 @@ describe('nvdCveResource', () => {
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/Invalid CVE ID format/);
   });
 
-  // Issue #33: a resource read of a malformed URI surfaced neither reason nor recovery hint.
-  it('carries reason and recovery hint on an invalid CVE ID format', async () => {
+  /**
+   * Issue #33: a resource read of a malformed URI surfaced neither reason nor recovery hint. The
+   * handler names the reason; the framework fills the hint from the matching `errors[]` entry at
+   * the resource boundary, so both halves are pinned here.
+   */
+  it('carries the reason whose declared recovery hint names the URI form', async () => {
     const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = resourceParams.parse({ cveId: 'INVALID-ID' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'invalid_cve_id_format',
-        recovery: { hint: expect.stringContaining('nvd://cve/') },
-      },
+      data: { reason: 'invalid_cve_id_format', cveId: 'INVALID-ID' },
     });
+    expect(declaredRecovery('invalid_cve_id_format')).toContain('nvd://cve/');
   });
 
   it('propagates service errors (e.g. rate_limited)', async () => {
@@ -160,16 +167,16 @@ describe('nvdCveResource — absent CVE (service-level throw)', () => {
     await expect(nvdCveResource.handler(params, ctx)).rejects.toThrow(/not found/i);
   });
 
-  // The resource's cve_not_found errors[] entry is what supplies this hint to the service throw
-  // via ctx.recoveryFor — dropping the entry would silently blank it.
-  it('carries reason and a non-empty nvd_search_cves recovery hint', async () => {
+  /**
+   * The resource's cve_not_found errors[] entry is what the framework fills onto the service
+   * throw at the resource boundary — dropping the entry would silently blank the hint.
+   */
+  it('carries the reason whose declared recovery hint points at nvd_search_cves', async () => {
     const ctx = createMockContext({ errors: nvdCveResource.errors });
     const params = resourceParams.parse({ cveId: 'CVE-9999-99999' });
     await expect(nvdCveResource.handler(params, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'cve_not_found',
-        recovery: { hint: expect.stringContaining('nvd_search_cves') },
-      },
+      data: { reason: 'cve_not_found' },
     });
+    expect(declaredRecovery('cve_not_found')).toContain('nvd_search_cves');
   });
 });

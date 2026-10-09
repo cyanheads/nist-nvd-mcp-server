@@ -341,7 +341,8 @@ describe('NvdCpeService.searchCpes — NVD CPE parameter rejection (issue #45)',
 
   const service = new NvdCpeService({} as never, {} as never);
 
-  it('translates a rejected cpeMatchString into invalid_cpe_format with a recovery hint', async () => {
+  // The recovery hint is filled at the tool boundary — asserted in the nvd_search_cpes tool tests.
+  it('translates a rejected cpeMatchString into invalid_cpe_format', async () => {
     mockClient.get.mockRejectedValue(
       nvdHttpClientModule.nvdRequestRejected(
         'cpes/2.0',
@@ -353,11 +354,7 @@ describe('NvdCpeService.searchCpes — NVD CPE parameter rejection (issue #45)',
     await expect(
       service.searchCpes({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' }, ctx),
     ).rejects.toMatchObject({
-      data: {
-        reason: 'invalid_cpe_format',
-        cpe: 'cpe:2.3:a:zzz notavendor:%%%:',
-        recovery: { hint: expect.stringContaining('cpe:2.3:') },
-      },
+      data: { reason: 'invalid_cpe_format', cpe: 'cpe:2.3:a:zzz notavendor:%%%:' },
     });
   });
 

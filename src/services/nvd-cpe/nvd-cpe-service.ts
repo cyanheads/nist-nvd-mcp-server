@@ -71,11 +71,7 @@ export class NvdCpeService {
       if (params.cpeMatchString && isNvdRequestRejected(err)) {
         throw validationError(
           `Invalid CPE string "${params.cpeMatchString}". ${err.message}`,
-          {
-            reason: 'invalid_cpe_format',
-            cpe: params.cpeMatchString,
-            ...ctx.recoveryFor('invalid_cpe_format'),
-          },
+          { reason: 'invalid_cpe_format', cpe: params.cpeMatchString },
           { cause: err },
         );
       }

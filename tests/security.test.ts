@@ -5,7 +5,7 @@
  * @module tests/security
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdCveResource } from '@/mcp-server/resources/definitions/nvd-cve.resource.js';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -525,11 +525,12 @@ describe('Security — NVD CPE parameter rejection stays inside the declared con
 
   it('nvd_audit_cpe: a structurally incomplete cpeName reports invalid_cpe_format', async () => {
     rejectWith('cves/2.0', 'Invalid cpeName parameter, see documentation.');
-    const ctx = createMockContext({ errors: nvdAuditCpe.errors });
-    const input = nvdAuditCpe.input.parse({ cpeName: 'cpe:2.3:a:zzznotavendor' });
+    // Through the contract boundary, where the declared recovery hint is filled.
+    const result = await runToolContract(nvdAuditCpe, { cpeName: 'cpe:2.3:a:zzznotavendor' });
 
-    await expect(nvdAuditCpe.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_cpe_format', recovery: { hint: expect.any(String) } },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cpe_format', recovery: { hint: expect.any(String) } } },
     });
   });
 

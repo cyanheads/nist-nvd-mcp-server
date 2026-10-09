@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
 import * as nvdCpeServiceModule from '@/services/nvd-cpe/nvd-cpe-service.js';
@@ -370,13 +370,18 @@ describe('nvdSearchCpes — NVD CPE rejection carries the declared contract (iss
         ),
     } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
 
-    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
-    const input = nvdSearchCpes.input.parse({ cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' });
+    // Through the contract boundary: the declared recovery is filled there, not at the throw site.
+    const result = await runToolContract(nvdSearchCpes, {
+      cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:',
+    });
 
-    await expect(nvdSearchCpes.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'invalid_cpe_format',
-        recovery: { hint: expect.stringContaining('cpe:2.3:') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'invalid_cpe_format',
+          recovery: { hint: expect.stringContaining('cpe:2.3:') },
+        },
       },
     });
   });

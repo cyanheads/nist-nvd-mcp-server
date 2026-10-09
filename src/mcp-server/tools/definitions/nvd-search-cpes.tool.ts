@@ -129,7 +129,6 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       throw ctx.fail(
         'missing_search_input',
         'At least one of keyword or cpeMatchString is required.',
-        ctx.recoveryFor('missing_search_input'),
       );
     }
 
@@ -137,7 +136,6 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       throw ctx.fail(
         'invalid_cpe_format',
         `Invalid CPE string: "${input.cpeMatchString}". CPEv2.3 strings must start with "cpe:2.3:".`,
-        ctx.recoveryFor('invalid_cpe_format'),
       );
     }
 

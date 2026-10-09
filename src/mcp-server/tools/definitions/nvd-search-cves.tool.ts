@@ -287,7 +287,6 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       throw ctx.fail(
         'exact_phrase_without_keyword',
         'exactPhrase selects how keyword is matched and cannot be used without one.',
-        ctx.recoveryFor('exact_phrase_without_keyword'),
       );
     }
 
@@ -296,7 +295,6 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       throw ctx.fail(
         'mutually_exclusive_params',
         'pubDays and pubStartDate/pubEndDate are mutually exclusive.',
-        ctx.recoveryFor('mutually_exclusive_params'),
       );
     }
     if (input.lastModDays !== undefined && (input.lastModStartDate || input.lastModEndDate)) {
@@ -313,32 +311,16 @@ export const nvdSearchCves = tool('nvd_search_cves', {
 
     // Validate co-requirement: start and end must be provided together.
     if (input.pubStartDate && !input.pubEndDate) {
-      throw ctx.fail(
-        'missing_date_pair',
-        'pubStartDate requires pubEndDate.',
-        ctx.recoveryFor('missing_date_pair'),
-      );
+      throw ctx.fail('missing_date_pair', 'pubStartDate requires pubEndDate.');
     }
     if (input.pubEndDate && !input.pubStartDate) {
-      throw ctx.fail(
-        'missing_date_pair',
-        'pubEndDate requires pubStartDate.',
-        ctx.recoveryFor('missing_date_pair'),
-      );
+      throw ctx.fail('missing_date_pair', 'pubEndDate requires pubStartDate.');
     }
     if (input.lastModStartDate && !input.lastModEndDate) {
-      throw ctx.fail(
-        'missing_date_pair',
-        'lastModStartDate requires lastModEndDate.',
-        ctx.recoveryFor('missing_date_pair'),
-      );
+      throw ctx.fail('missing_date_pair', 'lastModStartDate requires lastModEndDate.');
     }
     if (input.lastModEndDate && !input.lastModStartDate) {
-      throw ctx.fail(
-        'missing_date_pair',
-        'lastModEndDate requires lastModStartDate.',
-        ctx.recoveryFor('missing_date_pair'),
-      );
+      throw ctx.fail('missing_date_pair', 'lastModEndDate requires lastModStartDate.');
     }
 
     const datesClamped: Array<{ param: string; original: number; clamped: number }> = [];
@@ -379,7 +361,6 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       throw ctx.fail(
         'invalid_severity_for_version',
         'CVSS v2 has no CRITICAL severity tier. Valid values for severityVersion="v2" are LOW, MEDIUM, HIGH.',
-        ctx.recoveryFor('invalid_severity_for_version'),
       );
     }
 
@@ -392,14 +373,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         throw ctx.fail(
           'invalid_date_format',
           `Invalid date for pubStartDate: "${pubStartDate}". Expected ISO 8601 format.`,
-          ctx.recoveryFor('invalid_date_format'),
         );
       }
       if (Number.isNaN(end.getTime())) {
         throw ctx.fail(
           'invalid_date_format',
           `Invalid date for pubEndDate: "${pubEndDate}". Expected ISO 8601 format.`,
-          ctx.recoveryFor('invalid_date_format'),
         );
       }
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
@@ -407,14 +386,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         throw ctx.fail(
           'date_range_inverted',
           'pubEndDate is before pubStartDate — the date range is inverted.',
-          ctx.recoveryFor('date_range_inverted'),
         );
       }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',
           `Publication date range spans ${Math.ceil(days)} days; maximum is 120.`,
-          ctx.recoveryFor('date_range_exceeds_max'),
         );
       }
     }
@@ -426,14 +403,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         throw ctx.fail(
           'invalid_date_format',
           `Invalid date for lastModStartDate: "${lastModStartDate}". Expected ISO 8601 format.`,
-          ctx.recoveryFor('invalid_date_format'),
         );
       }
       if (Number.isNaN(end.getTime())) {
         throw ctx.fail(
           'invalid_date_format',
           `Invalid date for lastModEndDate: "${lastModEndDate}". Expected ISO 8601 format.`,
-          ctx.recoveryFor('invalid_date_format'),
         );
       }
       const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
@@ -441,14 +416,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         throw ctx.fail(
           'date_range_inverted',
           'lastModEndDate is before lastModStartDate — the date range is inverted.',
-          ctx.recoveryFor('date_range_inverted'),
         );
       }
       if (days > MAX_DATE_RANGE_DAYS) {
         throw ctx.fail(
           'date_range_exceeds_max',
           `Last-modified date range spans ${Math.ceil(days)} days; maximum is 120.`,
-          ctx.recoveryFor('date_range_exceeds_max'),
         );
       }
     }

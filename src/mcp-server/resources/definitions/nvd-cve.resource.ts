@@ -34,8 +34,8 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
     {
       /**
        * Thrown by the service, not this handler: a single-ID fetch that NVD answers with no
-       * records raises `cve_not_found` there. The entry stays declared here so the service's
-       * `ctx.recoveryFor('cve_not_found')` resolves this recovery text onto the wire.
+       * records raises `cve_not_found` there. The entry stays declared here so the framework
+       * fills this recovery text onto the wire when that throw reaches the resource boundary.
        */
       reason: 'cve_not_found',
       code: JsonRpcErrorCode.NotFound,
@@ -52,7 +52,7 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
       throw ctx.fail(
         'invalid_cve_id_format',
         `Invalid CVE ID format: "${cveId}". Expected format: CVE-YYYY-NNNNN.`,
-        { cveId, ...ctx.recoveryFor('invalid_cve_id_format') },
+        { cveId },
       );
     }
 
