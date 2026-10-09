@@ -21,7 +21,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "NVD_API_KEY": "${user_config.NVD_API_KEY}"
       }
     }
   },
@@ -32,5 +33,14 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "NVD_API_KEY": {
+      "title": "NVD API Key",
+      "type": "string",
+      "description": "Optional. Without a key the NVD rate limit is 5 requests per 30 seconds; with one, 50. Get one free at nvd.nist.gov/developers/request-an-api-key.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    }
+  }
 }
