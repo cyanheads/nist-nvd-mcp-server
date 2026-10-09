@@ -190,7 +190,8 @@ export class NvdHttpClient {
     if (ctx.signal.aborted) throw timeout('NVD request cancelled by caller.');
 
     const url = this.buildUrl(endpoint, params);
-    ctx.log.debug('NVD API request', { endpoint, url: url.toString() });
+    // The endpoint only: the full URL carries caller-supplied query values into the log record.
+    ctx.log.debug('NVD API request', { endpoint });
 
     // Advance the pacer only once a request is actually going out — an attempt that bailed above
     // sent nothing, so charging it a slot would delay the next live caller for no upstream cost.
