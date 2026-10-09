@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-08
+
+Adopts mcp-ts-core ^0.13.14: numeric and boolean strings are accepted for number and boolean arguments, tool errors carry a request ID, and the Claude Code and Codex plugins and the .mcpb bundle take an optional NVD API key instead of sending a placeholder.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-20
 
 Adopts mcp-ts-core ^0.13.6: argument rejections classify InvalidParams with a recovery hint, caller disconnects classify RequestCancelled, and the public hosted endpoint is now published in server.json and the README.
