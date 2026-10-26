@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/nist-nvd-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/nist-nvd-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/nist-nvd-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/nist-nvd-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/nist-nvd-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/nist-nvd-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-CVE and CPE data from the NIST National Vulnerability Database. Search and audit vulnerabilities by keyword, severity, CWE, or CISA KEV status, resolve products to CPE names, and track a CVE's revision history from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+CVE and CPE data from the NIST National Vulnerability Database. Search and audit vulnerabilities by keyword, severity, CWE, or CISA KEV status, resolve products to CPE names, and track a CVE's revision history.
 
 ### Tools
 
@@ -51,6 +51,8 @@ All resource data is also reachable via tools.
 
 ## Capability reference
 
+Oversized read limits clamp by default: 2000 for CVE search, audit, and history; 10000 for CPE search; 100 IDs for batch lookup. Clamped calls report `requestedLimit`, `effectiveLimit`, and a notice on both output surfaces. Batch lookup validates every supplied ID and lists normalized, deduplicated IDs beyond the processed prefix in `unprocessedIds`; `missingIds` covers queried IDs only. Set `NVD_CLAMP_LIMITS=false` before startup to restore advertised maxima and reject oversized requests. Zero, negative, and fractional limits remain invalid.
+
 ### `nvd_search_cves` <sub>tool</sub>
 
 - Full-text keyword search (AND-semantics across words), or `exactPhrase: true` for an exact-phrase match — requires `keyword`
@@ -66,9 +68,9 @@ All resource data is also reachable via tools.
 - Batch up to 100 CVE IDs per call
 - Full mode (default): CVSS scores across v2.0/v3.0/v3.1/v4.0, CWE weaknesses, CPE configurations, CISA KEV fields, references
 - `brief: true` returns trimmed rows (ID, status, top severity, KEV name, truncated description) — recommended for batches over 10
-- `includeReferences: false` strips the references array; `allLanguages: true` renders every localized description instead of English-only
+- `includeReferences` and `includeConfigurations` default to true; set either false to omit that field from both output surfaces. `allLanguages: true` keeps every localized description instead of English-only
 - `missingIds` enrichment field lists any requested IDs NVD didn't return
-- Rendered text caps references at 15 per record, with a `… N more` trailer
+- Both output surfaces carry every selected reference and CPE configuration; optional SSVC assessments appear when NVD supplies them
 
 ---
 
@@ -84,8 +86,9 @@ All resource data is also reachable via tools.
 ### `nvd_audit_cpe` <sub>tool</sub>
 
 - Two modes: exact `cpeName` (NVD auto-applies `isVulnerable`) or `virtualMatchString` with optional `versionStart`/`versionEnd` bounds (inclusive/exclusive)
-- Client-side `severityMin` filter drops low-signal entries from the fetched page — it can only remove what `limit` already retrieved
+- Client-side `severityMin` filters the fetched page by the highest severity band across all CVSS metrics; the headline still follows the highest numerical score. It can only remove what `limit` retrieved
 - Returns full CVE records (CVSS scores, CWE, CPE configurations, KEV fields, references)
+- `includeReferences` and `includeConfigurations` default to true; false omits that field from both output surfaces. SSVC assessments remain optional
 - Pagination via `limit` (up to 2000, default 20) and `offset` — page at a modest limit rather than raising it, since each result is a full record
 - `auditTarget` enrichment field echoes the CPE identifier used, so callers can verify the correct product was queried
 
@@ -115,7 +118,8 @@ NVD-specific:
 - Retry wraps the pacer rather than sitting inside it — every attempt takes its own turn in the queue, so retries count against the rate budget instead of bursting past it
 - A 403's `Retry-After` holds the whole queue until NVD's window resets; keyless, a 403 fails fast and names `NVD_API_KEY` rather than spending the 5-request budget on retries that cannot outlast a 30-second window
 - Deterministic rejections fail fast instead of consuming retries — NVD answers both a bad parameter and a refused API key with HTTP 404, separated only by a `message` header, so a refused key surfaces as a config fault naming `NVD_API_KEY` rather than as a malformed CVE ID
-- HTML-response guard catches NVD rate-limit pages served as HTML instead of a 403
+- NVD block pages return a nonretryable blocked-request error; malformed JSON and response envelopes return an invalid-response error with recovery guidance
+- Request timeouts and caller cancellation remain active through response-body reads
 
 Agent-friendly output:
 
@@ -245,6 +249,7 @@ cp .env.example .env
 |:---------|:------------|:--------|
 | `NVD_API_KEY` | NVD API key. Without it, rate limit is 5 req/30s; with it, 50 req/30s. Get one free at [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key). | — |
 | `NVD_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. The history endpoint is slow without an API key — raise to 60000 if using `nvd_get_cve_history` without a key. | `10000` |
+| `NVD_CLAMP_LIMITS` | Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. `false` restores schema maxima and rejection. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -253,6 +258,8 @@ cp .env.example .env
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
+
+Node and Bun load `.env` from the working directory before server configuration is parsed. Exported variables take precedence. Invalid `NVD_CLAMP_LIMITS` values fail configuration validation; use `true` or `false`.
 
 ## Running the server
 

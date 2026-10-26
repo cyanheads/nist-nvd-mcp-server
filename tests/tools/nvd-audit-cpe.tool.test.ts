@@ -3,8 +3,9 @@
  * @module tests/tools/nvd-audit-cpe.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
@@ -87,7 +88,7 @@ const AND_GROUP_CVE: CveRecord = {
   ],
 };
 
-/** Eight CPE matches split across two nodes of one group — three past the render cap. */
+/** Eight CPE matches split across two groups, beyond the former render cap. */
 const MANY_MATCH_CVE: CveRecord = {
   cveId: 'CVE-2021-44224',
   vulnStatus: 'Analyzed',
@@ -139,6 +140,162 @@ function makeAuditResult(
     ...extra,
   };
 }
+
+describe('nvdAuditCpe — full rendering parity', () => {
+  const record: CveRecord = {
+    ...MANY_MATCH_CVE,
+    descriptions: [
+      { lang: 'en', value: `**literal**\n- ${'detail '.repeat(60)}` },
+      { lang: 'es', value: '<b>texto</b>' },
+    ],
+    references: Array.from({ length: 7 }, (_, i) => ({
+      url: `https://example.test/${i}?x=[a]`,
+      source: 'name`\n[source]',
+      tags: ['**advisory**'],
+    })),
+  };
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      auditCpe: vi.fn().mockResolvedValue(makeAuditResult([record], { filteredCount: 0 })),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+  });
+  it('characterizes full structured records without trimming nested sections', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+      allLanguages: true,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ cves: [record] });
+  });
+  it.each([
+    {
+      includeConfigurations: false,
+      includeReferences: true,
+      omitted: 'configurationNodes',
+      marker: '**Configurations:**',
+    },
+    {
+      includeConfigurations: true,
+      includeReferences: false,
+      omitted: 'references',
+      marker: '**References (',
+    },
+  ])(
+    'omits $omitted on both surfaces without mutating service records (issue #61)',
+    async ({ includeConfigurations, includeReferences, omitted, marker }) => {
+      const result = await runToolContract(nvdAuditCpe, {
+        cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+        includeConfigurations,
+        includeReferences,
+      } as never);
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        cves: [expect.not.objectContaining({ [omitted]: expect.anything() })],
+      });
+      expect(
+        result.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n'),
+      ).not.toContain(marker);
+      expect(record.configurationNodes).toHaveLength(2);
+      expect(record.references).toHaveLength(7);
+    },
+  );
+  it('keeps default and explicit selectors identical (issue #61)', async () => {
+    const defaults = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+    });
+    const explicit = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+      includeConfigurations: true,
+      includeReferences: true,
+    } as never);
+    expect(explicit.structuredContent).toEqual(defaults.structuredContent);
+    expect(explicit.content).toEqual(defaults.content);
+  });
+  it('omits both selected sections on an empty past-end page (issue #61)', async () => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      auditCpe: vi
+        .fn()
+        .mockResolvedValue(makeAuditResult([], { totalResults: 1, offset: 1, filteredCount: 0 })),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+      offset: 1,
+      includeConfigurations: false,
+      includeReferences: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      cves: [],
+      offset: 1,
+      returned: 0,
+      notice: expect.stringContaining('past the end'),
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('No CVEs returned') }),
+      ]),
+    );
+  });
+  it('rejects nonboolean section selectors (issue #61)', () => {
+    expect(nvdAuditCpe.input.safeParse({ includeConfigurations: 'false' }).success).toBe(false);
+    expect(nvdAuditCpe.input.safeParse({ includeReferences: 'false' }).success).toBe(false);
+  });
+  it('renders every reference, nested criterion and language without losing literal text', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+      allLanguages: true,
+    });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    for (const reference of record.references!)
+      expect(text).toContain(markdownLink(reference.url, reference.url));
+    for (const node of record.configurationNodes)
+      for (const match of node.cpeMatch)
+        expect(text).toContain(escapeMarkdownInline(match.criteria));
+    for (const description of record.descriptions)
+      expect(text).toContain(escapeMarkdownInline(description.value));
+    expect(text).toContain(escapeMarkdownInline('name`\n[source]'));
+    expect(text).toContain(escapeMarkdownInline('**advisory**'));
+    expect(text).not.toContain('…');
+  });
+  it.each([
+    [
+      'nvd_invalid_response',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Retry later; report a persistent invalid NVD response.',
+    ],
+    [
+      'nvd_request_blocked',
+      JsonRpcErrorCode.Forbidden,
+      'Rephrase query text; otherwise try later or use another network.',
+    ],
+  ] as const)('renders the %s recovery on both error surfaces', async (reason, code, hint) => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      auditCpe: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code, data: { reason, recovery: { hint } } },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
+      ]),
+    );
+    expect(nvdAuditCpe.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+      thrownBy: 'service',
+      retryable: false,
+    });
+  });
+});
 
 describe('nvdAuditCpe', () => {
   const mockService = { auditCpe: vi.fn() };
@@ -261,7 +418,7 @@ describe('nvdAuditCpe', () => {
     const blocks = nvdAuditCpe.format!({ cves: [FULL_CVE] });
     const text = (blocks[0] as { text: string }).text;
 
-    expect(text).toContain('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*');
+    expect(text).toContain(escapeMarkdownInline('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*'));
     expect(text).toContain('>= 2.0');
     expect(text).toContain('< 2.15.0');
     expect(text).toContain('1 configuration group(s), 1 node(s), 1 CPE match(es)');
@@ -275,32 +432,30 @@ describe('nvdAuditCpe', () => {
 
     // Two AND-combined nodes, three criteria: (firmware- OR firmware9.0) AND hardware.
     expect(text).toContain('1 configuration group(s), 2 node(s), 3 CPE match(es)');
-    expect(text).toContain('cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*');
+    expect(text).toContain(escapeMarkdownInline('cpe:2.3:o:netapp:a700s_firmware:-:*:*:*:*:*:*:*'));
     // The group AND marks the two nodes as jointly required; the node OR combines the two
     // firmware criteria as alternatives. Both, plus the shared group, must reach content[].
     expect(text).toContain(
       '[group 0; AND with sibling nodes; OR within node; vulnerable component]',
     );
     expect(text).toContain(
-      'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*') +
+        ' [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
     );
   });
 
-  it('caps CPE matches at five per CVE across nodes and trails with the omitted count', () => {
+  it('renders all criteria across nodes past the former cap', () => {
     const blocks = nvdAuditCpe.format!({ cves: [MANY_MATCH_CVE] });
     const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('2 configuration group(s), 2 node(s), 8 CPE match(es)');
-    /**
-     * The cap falls inside the second node — three criteria from group 0, two from group 1 — so
-     * the trailer count has to be computed over the flattened criteria, not per node.
-     */
-    expect(text).toContain('… 3 more');
-    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(5);
-    expect(text).toContain('cpe:2.3:o:fedoraproject:fedora:34:*:*:*:*:*:*:* [group 1');
-    // The trailer names what was dropped — the last three are not silently missing.
-    expect(text).not.toContain('fedora:35');
-    expect(text).not.toContain('fedora:37');
+    expect(text).not.toContain('… 3 more');
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(8);
+    expect(text).toContain(
+      escapeMarkdownInline('cpe:2.3:o:fedoraproject:fedora:34:*:*:*:*:*:*:*') + ' [group 1',
+    );
+    expect(text).toContain('fedora:35');
+    expect(text).toContain('fedora:37');
   });
 
   it('formats sparse CVE without severity using "Not available"', () => {
@@ -866,7 +1021,7 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
     }
   ).properties.cves.items;
 
-  it('advertises exactly the eleven full-record fields', () => {
+  it('advertises the full-record fields including optional SSVC', () => {
     expect(Object.keys(item.properties)).toEqual([
       'cveId',
       'vulnStatus',
@@ -875,6 +1030,7 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
       'descriptions',
       'cvssScores',
       'severity',
+      'ssvc',
       'weaknesses',
       'configurationNodes',
       'references',
@@ -882,7 +1038,7 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
     ]);
   });
 
-  /** `references`, `severity`, and `cisaKev` are all conditionally emitted upstream. */
+  /** Configuration selectors may omit nodes; other optional fields depend on upstream data. */
   it('requires only the fields the normalizer assigns unconditionally', () => {
     expect(item.required).toEqual([
       'cveId',
@@ -892,7 +1048,6 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
       'descriptions',
       'cvssScores',
       'weaknesses',
-      'configurationNodes',
     ]);
   });
 });
@@ -988,7 +1143,8 @@ describe('nvdAuditCpe — configuration nodes reach structuredContent and conten
     const text = (at(result.content as Array<{ text?: string }>) as { text: string }).text;
     expect(text).toContain('1 configuration group(s), 2 node(s), 3 CPE match(es)');
     expect(text).toContain(
-      'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*') +
+        ' [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
     );
   });
 });

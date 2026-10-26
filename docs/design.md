@@ -67,6 +67,9 @@ All three share a common HTTP layer with rate-limit queuing. A single `NvdHttpCl
 |:--------|:---------|:------------|
 | `NVD_API_KEY` | No | NIST NVD API key. Without it, rate limit is 5 req/30s. With it, 50 req/30s. Get one free at nvd.nist.gov/developers/request-an-api-key. Strongly recommended for production use. |
 | `NVD_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in milliseconds. Default: 10000 (10s). NVD can be slow under load. |
+| `NVD_CLAMP_LIMITS` | No | Default true. Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False restores advertised schema maxima and rejection. |
+
+Server configuration loads the working-directory `.env` before parsing on both Node and Bun, preserves exported values, and caches the parsed configuration. Invalid switch values and unreadable env files fail as configuration errors; a missing `.env` is allowed.
 
 ---
 
@@ -142,6 +145,8 @@ Two properties of the upstream shape drive the extraction. **`baseSeverity` sits
 
 The derivation follows NVD's published v2.0 bands — `0.0–3.9` LOW, `4.0–6.9` MEDIUM, `7.0–10.0` HIGH — rather than adding a `NONE` tier at `0.0`. CVSS v2 defines no such tier and NVD labels every `0.0` v2 metric LOW; a label outside LOW/MEDIUM/HIGH/CRITICAL is also one the `severityMin` ordering cannot rank, so any threshold would drop it — the same data loss keeping `0.0` exists to prevent.
 
+`severityMin` evaluates the highest severity band across every metric independently of the highest numerical score used for the canonical headline. A qualifying lower-score metric therefore keeps the CVE even when its headline comes from another version. Records without a qualifying band are dropped from the fetched page; filtering never fetches additional pages.
+
 ### An audit that finds nothing is a result, not an error
 
 `nvd_audit_cpe` returns an empty page with `totalCount: 0` when NVD holds no CVEs for the target, on both input arms. A product with a clean record and a mistyped CPE are indistinguishable from `totalResults: 0` alone, so raising `cpe_not_found` asserted the wrong one — and did so right after `nvd_search_cpes` had resolved the exact name the audit was handed. Telling a caller its CPE may not exist is the more expensive mistake: *this version has no known CVEs* is the answer a vulnerability audit exists to give.
@@ -180,6 +185,12 @@ The tool exposes a `brief` boolean (default `false`). When `true`, each record i
 
 The tool description documents this explicitly so agents make the tradeoff deliberately, not by accident.
 
+### Oversized read requests clamp with disclosure
+
+With `NVD_CLAMP_LIMITS=true` (default), paged requests above the NVD limit process 2000 CVEs/events or 10000 CPEs, and batch lookup processes the first 100 IDs. Clamped calls carry optional `requestedLimit`, `effectiveLimit`, and a notice on both surfaces, log once, and increment a counter with bounded tool-name labels. Unclamped calls add no clamp fields. The false setting restores advertised maxima and rejection. Zero, negative, and fractional page limits always fail.
+
+Batch lookup validates every ID before selecting the prefix. `unprocessedIds` holds normalized, deduplicated IDs after that prefix that were not already attempted; `missingIds` holds attempted IDs NVD did not return. `requested` counts the processed prefix. This preserves upstream request bounds while allowing a caller to continue explicitly.
+
 ### nvd_search_cves date convenience params
 
 `pubDays` and `lastModDays` are integer shorthands for date-range queries. The tool translates them to the API's required date-pair format at call time:
@@ -195,7 +206,11 @@ The NVD enforces sliding window rate limits (5 or 50 requests per 30-second wind
 
 **Retry wraps the queue rather than sitting inside it.** Every attempt — the first try and each retry — is enqueued separately and takes its own turn, so a retrying call spends its retries against the same budget as any other request. The alternative (retrying inside one queue slot) lets a single call fire its whole retry fan-out unpaced, which is how a lone transient failure used to exhaust the keyless budget and self-inflict 403s.
 
-**A 403 holds the queue, and only one wait fits inside a call.** The parsed `Retry-After` (~30s) blocks every pending request until NVD's window resets, not just the retrying one. That wait is half the MCP client's 60s request deadline, so at most one fits inside a call: a keyed call spends it on a single patient retry, while a keyless call — whose 5-request budget cannot spare it — fails fast and names `NVD_API_KEY`. Retrying a keyless 403 on the 2s exponential can never clear a 30s window, so it only burns budget before failing anyway. For the same reason keyless calls retry other transient failures once rather than three times.
+**A rate-limit response holds the queue, and only one wait fits inside a call.** The parsed `Retry-After` (~30s) blocks every pending request until NVD's window resets, not just the retrying one. That wait is half the MCP client's 60s request deadline, so at most one fits inside a call: a keyed call spends it on a single patient retry, while a keyless call fails fast and names `NVD_API_KEY`. Keyless calls retry other transient failures once rather than three times. A 403 HTML response containing NVD's block marker and no `Retry-After` instead raises nonretryable `nvd_request_blocked` without changing queue backoff.
+
+**Response bodies remain inside the attempt lifetime.** The timeout and caller signal cover headers and body consumption. Caller cancellation propagates as `RequestCancelled`; attempt expiration is `Timeout`. A cancelled source-dictionary lookup leaves its cache cold. JSON parsing and endpoint-envelope validation happen after transport retries; malformed JSON or unusable envelopes raise nonretryable `nvd_invalid_response` rather than an empty success or a missing-record result. Optional source metadata can still fall back to raw identifiers when unavailable.
+
+All five tools and the CVE resource declare `nvd_invalid_response` (`ServiceUnavailable`) and `nvd_request_blocked` (`Forbidden`) with recovery guidance. Search also declares `nvd_request_rejected` with case-sensitive CWE forms and full datetime examples.
 
 **Deterministic rejections are never retried.** NVD answers a 404 with an empty body and its diagnosis in a `message` response header. The client throws it as an `McpError` carrying `data.retryable === false` (the framework's opt-out) so `withRetry` fails fast instead of re-sending a request that cannot succeed. Callers key off that error shape via `isNvdRequestRejected()` rather than matching the message text.
 
@@ -257,6 +272,7 @@ Present only when the CVE appears in the CISA KEV catalog:
 - `cveIds: string | string[]` — one CVE ID or an array of up to 100 (e.g., `"CVE-2021-44228"` or `["CVE-2021-44228", "CVE-2022-0001"]`)
 - `brief?: boolean` — default `false`. When `true`, returns trimmed records (ID, status, top CVSS score, KEV name, published date, truncated description) instead of full detail. Recommended for batches of more than 10.
 - `includeReferences?: boolean` — default `true`. Set to `false` to omit the references array and reduce response size.
+- `includeConfigurations?: boolean` — default `true`. Set to `false` to omit configuration nodes from both surfaces.
 - `allLanguages?: boolean` — default `false`. When `false`, full records keep only the English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description. Brief records always carry a single truncated description.
 
 **Output:**
@@ -264,16 +280,18 @@ Present only when the CVE appears in the CISA KEV catalog:
 - `cves[]` — one item schema spanning both modes, since a tool's `output` must be a flat object and cannot branch on a discriminator. `cveId`, `vulnStatus`, and `published` are the only required fields; every field either mode adds is declared optional, because the framework parses each success return against this schema and a full-record field marked required would reject every `brief: true` call.
   - Full mode (the default) emits `lastModified`, `descriptions`, `cvssScores` (all versions present), `severity` (highest score label + version source), `weaknesses`, `configurationNodes`, `references` (unless `includeReferences: false`), and `cisaKev` (KEV catalog members only). The `source` on a weakness or reference carries the contributor name NVD publishes for the identifier (`CVE`, `CISA-ADP`); an email-form identifier keeps its address, and an identifier the dictionary does not hold passes through raw. Brief mode drops `source` entirely, so it neither resolves nor reports one.
   - Brief mode emits `description` (first 200 characters, English-preferred), `severity`, and `cisaVulnerabilityName` — the trimmed substitutes for `descriptions` and `cisaKev`.
-  - The full-record fields come from the shared `CveRecordSchema` (`src/mcp-server/tools/schemas/full-cve.ts`), which `nvd_audit_cpe` declares its own records with directly, so one declaration describes the domain type on both surfaces.
+  - The full-record fields come from the shared `CveRecordSchema` (`src/mcp-server/tools/schemas/full-cve.ts`). Audit derives its output schema with optional `configurationNodes` for section selection; the full domain record retains that required field.
 
 `format()` tests each field for presence instead of branching on `brief`: the record itself says which fields it carries, and a mode-branched formatter renders only one field set per call — leaving the other mode's fields unverifiable against the declared schema.
 
 **Enrichment:** this tool looks up specific IDs rather than paging a result set, so it carries no pagination fields.
-- `requested: number` — how many CVE IDs the call asked for
+- `requested: number` — how many CVE IDs the processed prefix contains
 - `returned: number` — how many records came back
 - `missingIds?: string[]` — requested IDs NVD held no record for; absent when every ID matched
+- `unprocessedIds?: string[]` — normalized, deduplicated IDs outside the processed prefix that were not already attempted
+- `requestedLimit?: number` / `effectiveLimit?: number` — original and processed batch sizes, present only when clamped
 
-**Rendering caps.** `structuredContent` always carries the whole record. The formatted text renders CPE match criteria capped at the first 5 per CVE and references at the first 15, each with a `… N more` trailer. Both are bounded for the same reason: `cveIds` accepts up to 100 IDs, and a single dense CVE can carry hundreds of criteria (CVE-2021-44228 has 396 across 20 configuration nodes — ~27.8KB rendered in full versus ~0.36KB capped, plus 103 references at ~11.6KB versus ~2.07KB capped). The criteria trailer points at `nvd_audit_cpe`, which is how a caller reaches the remainder: auditing a specific `cpeName` answers whether a given product version is affected without enumerating every criterion. Descriptions are not capped by count — the formatter renders every language the record carries, so `allLanguages` reaches `content[]` clients and not just `structuredContent` ones.
+**Rendering parity.** Both surfaces carry every selected field: descriptions, references, configuration groups, nodes, and match criteria render in full. `includeReferences` and `includeConfigurations` default to true; either can be false to omit its field from both surfaces without changing the upstream lookup. Brief mode remains the deliberate compact shape. Optional `ssvc` assessments retain the source, timestamp, and decision points NVD supplies; absence remains absence.
 
 **Errors:**
 ```
@@ -321,8 +339,8 @@ errors: [
 - `returned: number` — CVEs in this response
 - `offset: number` — page offset used
 - `datesClamped?: { param, original, clamped }[]` — present when a `pubDays`/`lastModDays` value was reduced to 120
-- `filtersApplied?: { keyword?, exactPhrase?, severity?, severityVersion?, cweId?, kevOnly?, noRejected? }` — only the non-default filters the query actually applied, so an empty or unexpectedly narrow result set is accountable; absent when the query ran unfiltered
-- `notice?: string` — guidance when nothing matched or the offset ran past the result set
+- `filtersApplied?: { keyword?, exactPhrase?, severity?, severityVersion?, cweId?, pubStartDate?, pubEndDate?, lastModStartDate?, lastModEndDate?, kevOnly?, noRejected? }` — effective filters sent to NVD, including explicit or expanded date windows for exact replay; absent when the query ran unfiltered
+- `notice?: string` — ignored blank filters, limit clamping, and pagination guidance. String filters are trimmed; blank filters are omitted before companion checks.
 
 **Errors:**
 ```
@@ -355,8 +373,9 @@ errors: [
 - `virtualMatchString?: string` — partial CPE match pattern (e.g., `"cpe:2.3:a:apache:http_server:*"`). Use with version range params for range-based audits.
 - `versionStart?: string`, `versionStartType?: 'including' | 'excluding'` — lower version bound; requires `virtualMatchString`
 - `versionEnd?: string`, `versionEndType?: 'including' | 'excluding'` — upper version bound; requires `virtualMatchString`
-- `severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — filter out CVEs below this severity. Applied after NVD returns the page, so it only sees CVEs within `limit`.
+- `severityMin?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'` — filter by the highest band across every CVSS metric without changing the canonical headline. Applied to the fetched page only.
 - `allLanguages?: boolean` — default `false`. When `false`, each record keeps only its English description (falling back to whatever exists if a record has no English entry); set `true` to keep every localized description.
+- `includeConfigurations?: boolean` / `includeReferences?: boolean` — both default `true`; false omits that field from both output surfaces.
 - `limit?: number` — max results (default 20, max 2000)
 - `offset?: number` — zero-based page offset, passed upstream as `startIndex`
 
@@ -376,7 +395,7 @@ Exactly one of `cpeName` or `virtualMatchString` is required.
 - `filteredCount?: number` — CVEs the `severityMin` filter dropped from the page NVD returned. Present whenever `severityMin` is set. This is not `totalCount − returned`: CVEs beyond `limit` were never fetched, so they were never evaluated against the filter
 - `notice?: string` — distinguishes a target NVD holds no CVEs for, a `severityMin` threshold that emptied the page, and an `offset` past the end of the result set
 
-**Configurations rendering.** `structuredContent` always carries every configuration node. The formatted text renders each CVE's CPE match criteria — the criteria string, its version bounds, whether the CPE is the vulnerable component or only the context it runs in, and the operators combining it — capped at the first 5 per CVE with a `… N more` trailer, matching the cap this formatter already applies to `references`. The cap is what keeps the block bounded: `limit` accepts up to 2000 CVEs, and a single complex CVE can carry dozens of criteria (CVE-2021-44224 has 37 across 7 configuration nodes — 2,727 bytes rendered in full versus 373 capped). `nvd_get_cve` renders criteria through the same shared formatter and cap, so the two tools present the affected-product surface identically.
+**Configurations rendering.** Both surfaces carry every selected normalized configuration node and match criterion, preserving group membership, operators, version bounds, and vulnerable/context flags. References render in full. `includeConfigurations: false` or `includeReferences: false` omits that field from both surfaces; both selectors default to true.
 
 Each rendered line names the node's `groupIndex`, its `groupOperator`, and its `nodeOperator`, because the three answer different questions: `nodeOperator` combines the criteria inside one node, `groupOperator` combines that node with its sibling nodes, and `groupIndex` says which nodes those siblings are. An `AND` at the group level marks conditions that must hold together (a firmware node plus the hardware it runs on); without the group index a reader cannot tell which nodes it joins, and the criteria read as unrelated alternatives.
 

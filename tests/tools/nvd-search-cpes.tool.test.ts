@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-search-cpes.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { forbidden, JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
@@ -32,6 +32,63 @@ const CPE_NO_TITLE: CpeRecord = {
   cpeName: 'cpe:2.3:a:some_vendor:some_product:1.0:*:*:*:*:*:*:*',
   deprecated: false,
 };
+
+describe('nvdSearchCpes response and rendering contracts', () => {
+  it.each([
+    [
+      'nvd_invalid_response',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Try again later; if the failure persists, report the failing tool call.',
+    ],
+    [
+      'nvd_request_blocked',
+      JsonRpcErrorCode.Forbidden,
+      'Rephrase query text, or try again later or from another network.',
+    ],
+  ] as const)('fills %s recovery on both surfaces', async (reason, code, hint) => {
+    const error =
+      reason === 'nvd_invalid_response'
+        ? serviceUnavailable('Unusable response', { reason, retryable: false })
+        : forbidden('Blocked request', { reason, retryable: false });
+    vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue({
+      searchCpes: vi.fn().mockRejectedValue(error),
+    } as never);
+    const result = await runToolContract(nvdSearchCpes, { keyword: 'test' });
+    expect(result.structuredContent).toMatchObject({
+      error: { code, data: { reason, retryable: false, recovery: { hint } } },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
+      ]),
+    );
+  });
+
+  it('keeps literal Markdown and every raw product field on both surfaces', async () => {
+    const record = {
+      cpeName: 'cpe:2.3:a:vendor:product:`x`',
+      title: 'Product *literal* [title]',
+      deprecated: true,
+      deprecatedBy: ['replacement [literal]'],
+      lastModified: 'date *literal*',
+    };
+    vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue({
+      searchCpes: vi
+        .fn()
+        .mockResolvedValue({ cpes: [record], totalResults: 1, returned: 1, offset: 0 }),
+    } as never);
+    const result = await runToolContract(nvdSearchCpes, { keyword: 'test' });
+    expect(result.structuredContent).toMatchObject({ cpes: [record] });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('Product \\*literal\\* \\[title\\]');
+    expect(text).toContain('cpe:2.3:a:vendor:product:\\`x\\`');
+    expect(text).toContain('replacement \\[literal\\]');
+    expect(text).toContain('date \\*literal\\*');
+  });
+});
 
 function makeSearchResult(cpes: CpeRecord[] = [CPE_APACHE], total = 1, offset = 0) {
   return { cpes, totalResults: total, returned: cpes.length, offset };

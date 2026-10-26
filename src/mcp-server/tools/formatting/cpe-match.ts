@@ -5,6 +5,8 @@
  * @module src/mcp-server/tools/formatting/cpe-match
  */
 
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+
 /**
  * One CPE match criterion as it appears on a normalized CVE record's
  * `configurationNodes[].cpeMatch[]`.
@@ -30,14 +32,6 @@ export interface CpeConfigurationNode {
 }
 
 /**
- * Cap on CPE match criteria rendered per CVE. A dense record carries hundreds of criteria at
- * roughly 72 bytes a line — CVE-2021-44228 alone has 396, ~27.8KB rendered in full — and both
- * consumers return many records in one call, so the uncapped set would dominate the response.
- * Callers render this many and disclose the remainder.
- */
-export const CPE_MATCH_CAP = 5;
-
-/**
  * Render one CPE match as a single line: the criteria string, its version bounds, whether it is
  * the vulnerable component, and the logic that governs it. The two operators mean different
  * things — `nodeOperator` combines the criteria inside `node`, while `groupOperator` combines
@@ -47,19 +41,19 @@ export const CPE_MATCH_CAP = 5;
  */
 export function formatCpeMatch(match: CpeMatch, node: CpeConfigurationNode): string {
   const bounds = [
-    match.versionStartIncluding && `>= ${match.versionStartIncluding}`,
-    match.versionStartExcluding && `> ${match.versionStartExcluding}`,
-    match.versionEndIncluding && `<= ${match.versionEndIncluding}`,
-    match.versionEndExcluding && `< ${match.versionEndExcluding}`,
+    match.versionStartIncluding && `>= ${escapeMarkdownInline(match.versionStartIncluding)}`,
+    match.versionStartExcluding && `> ${escapeMarkdownInline(match.versionStartExcluding)}`,
+    match.versionEndIncluding && `<= ${escapeMarkdownInline(match.versionEndIncluding)}`,
+    match.versionEndExcluding && `< ${escapeMarkdownInline(match.versionEndExcluding)}`,
   ].filter(Boolean);
   const notes = [
     `group ${node.groupIndex}`,
-    node.groupOperator && `${node.groupOperator} with sibling nodes`,
-    node.nodeOperator && `${node.nodeOperator} within node`,
+    node.groupOperator && `${escapeMarkdownInline(node.groupOperator)} with sibling nodes`,
+    node.nodeOperator && `${escapeMarkdownInline(node.nodeOperator)} within node`,
     match.vulnerable ? 'vulnerable component' : 'not the vulnerable component',
   ].filter(Boolean);
   return (
-    `${match.criteria}` +
+    `${escapeMarkdownInline(match.criteria)}` +
     (bounds.length > 0 ? ` (${bounds.join(', ')})` : '') +
     ` [${notes.join('; ')}]`
   );

@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-10-09 04:24:49
+Generated on: 2026-10-26 07:00:30
 
 ```text
 nist-nvd-mcp-server/
@@ -39,6 +39,8 @@ nist-nvd-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -136,6 +138,9 @@ nist-nvd-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── nist-nvd-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -155,32 +160,41 @@ nist-nvd-mcp-server/
 │   │       │   ├── nvd-search-cpes.tool.ts
 │   │       │   └── nvd-search-cves.tool.ts
 │   │       ├── formatting/
-│   │       │   └── cpe-match.ts
-│   │       └── schemas/
-│   │           ├── brief-cve.ts
-│   │           └── full-cve.ts
+│   │       │   ├── cpe-match.ts
+│   │       │   └── ssvc.ts
+│   │       ├── schemas/
+│   │       │   ├── brief-cve.ts
+│   │       │   └── full-cve.ts
+│   │       └── read-limit.ts
 │   ├── services/
 │   │   ├── nvd-cpe/
 │   │   │   ├── nvd-cpe-service.ts
 │   │   │   └── types.ts
 │   │   ├── nvd-cve/
 │   │   │   ├── nvd-cve-service.ts
-│   │   │   └── types.ts
+│   │   │   ├── types.ts
+│   │   │   └── validate-cve-id.ts
 │   │   ├── nvd-http/
-│   │   │   └── nvd-http-client.ts
+│   │   │   ├── nvd-http-client.ts
+│   │   │   └── parse-nvd-response.ts
 │   │   └── nvd-source/
 │   │       ├── nvd-source-service.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── nvd-cve.resource.test.ts
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   ├── nvd-cpe-service.test.ts
 │   │   ├── nvd-cve-normalization.test.ts
 │   │   ├── nvd-cve-service.test.ts
 │   │   ├── nvd-http-client.test.ts
+│   │   ├── nvd-response-validation.test.ts
 │   │   └── nvd-source-service.test.ts
 │   ├── support/
 │   │   └── at.ts
@@ -190,7 +204,9 @@ nist-nvd-mcp-server/
 │   │   ├── nvd-get-cve-history.tool.test.ts
 │   │   ├── nvd-get-cve.tool.test.ts
 │   │   ├── nvd-search-cpes.tool.test.ts
-│   │   └── nvd-search-cves.tool.test.ts
+│   │   ├── nvd-search-cves.tool.test.ts
+│   │   ├── read-limit-policy.test.ts
+│   │   └── read-limits.test.ts
 │   ├── framework-contract.test.ts
 │   └── security.test.ts
 ├── .dockerignore
@@ -209,7 +225,9 @@ nist-nvd-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

@@ -206,17 +206,11 @@ describe('Security — injection and oversized input resistance', () => {
 
   // --- CVE ID format as injection barrier ---
 
-  it('nvd_get_cve: non-CVE string accepted by schema, forwarded to service which handles format validation', async () => {
-    // The tool schema accepts free-form strings; the service validates format
-    // This is valid behavior — the tool delegates format validation to the service layer
-    mockCveService.fetchById.mockRejectedValue(
-      Object.assign(new Error('Invalid CVE ID format'), {
-        data: { reason: 'invalid_cve_id_format' },
-      }),
-    );
+  it('nvd_get_cve: non-CVE string fails shared validation before the service', async () => {
     const ctx = createMockContext({ errors: nvdGetCve.errors });
     const input = nvdGetCve.input.parse({ cveIds: "'; SELECT * FROM cves;--" });
     await expect(nvdGetCve.handler(input, ctx)).rejects.toThrow('Invalid CVE ID format');
+    expect(mockCveService.fetchById).not.toHaveBeenCalled();
   });
 
   // --- Oversized inputs ---
@@ -228,8 +222,15 @@ describe('Security — injection and oversized input resistance', () => {
     expect(mockCveService.searchCves).toHaveBeenCalled();
   });
 
-  it('nvd_search_cves: limit over schema max is rejected by Zod', () => {
-    expect(() => nvdSearchCves.input.parse({ keyword: 'test', limit: 2001 })).toThrow();
+  it('nvd_search_cves: an over-cap read forwards only 2000 results', async () => {
+    await nvdSearchCves.handler(
+      nvdSearchCves.input.parse({ keyword: 'test', limit: 2001 }),
+      createMockContext({ errors: nvdSearchCves.errors }),
+    );
+    expect(mockCveService.searchCves).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 2000 }),
+      expect.anything(),
+    );
   });
 
   it('nvd_search_cpes: limit at schema max (10000) is accepted', async () => {
@@ -239,8 +240,15 @@ describe('Security — injection and oversized input resistance', () => {
     expect(mockCpeService.searchCpes).toHaveBeenCalled();
   });
 
-  it('nvd_search_cpes: limit over schema max is rejected by Zod', () => {
-    expect(() => nvdSearchCpes.input.parse({ keyword: 'apache', limit: 10_001 })).toThrow();
+  it('nvd_search_cpes: an over-cap read forwards only 10000 results', async () => {
+    await nvdSearchCpes.handler(
+      nvdSearchCpes.input.parse({ keyword: 'apache', limit: 10_001 }),
+      createMockContext({ errors: nvdSearchCpes.errors }),
+    );
+    expect(mockCpeService.searchCpes).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 10000 }),
+      expect.anything(),
+    );
   });
 
   it('nvd_get_cve: array of 100 CVE IDs is at schema max and accepted', () => {
@@ -251,12 +259,16 @@ describe('Security — injection and oversized input resistance', () => {
     expect(() => nvdGetCve.input.parse({ cveIds: ids })).not.toThrow();
   });
 
-  it('nvd_get_cve: array over 100 CVE IDs is rejected by Zod', () => {
+  it('nvd_get_cve: array over 100 CVE IDs forwards only the first 100', async () => {
     const ids = Array.from(
       { length: 101 },
       (_, i) => `CVE-2021-${String(i + 1000).padStart(5, '0')}`,
     );
-    expect(() => nvdGetCve.input.parse({ cveIds: ids })).toThrow();
+    await nvdGetCve.handler(
+      nvdGetCve.input.parse({ cveIds: ids }),
+      createMockContext({ errors: nvdGetCve.errors }),
+    );
+    expect(mockCveService.fetchById.mock.calls[0]?.[0]).toEqual(ids.slice(0, 100));
   });
 
   it('nvd_get_cve_history: offset at schema min (0) is accepted', () => {

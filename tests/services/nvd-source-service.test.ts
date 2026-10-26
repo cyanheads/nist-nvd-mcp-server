@@ -6,7 +6,7 @@
  * @module tests/services/nvd-source-service.test
  */
 
-import { serviceUnavailable, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { requestCancelled, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
@@ -155,7 +155,7 @@ describe('NvdSourceService — source identifier resolution', () => {
   });
 
   it('degrades to raw identifiers when the dictionary body is unusable', async () => {
-    // HTTP 200 with a body carrying no `sources` — an empty dictionary, not a thrown error.
+    // An invalid HTTP 200 envelope follows the unavailable-dictionary fallback.
     install(async () => ({ totalResults: 0 }));
     const cve = await fetchOne();
     expect(at(cve.weaknesses, 0).source).toBe('134c704f-9b21-4f2e-91b3-4a467353bcc0');
@@ -270,11 +270,13 @@ describe('NvdSourceService — source identifier resolution', () => {
     const controller = new AbortController();
     install(async () => {
       controller.abort();
-      throw timeout('NVD request cancelled by caller.');
+      throw requestCancelled('NVD request cancelled by caller.');
     });
     const service = new NvdSourceService({} as never, {} as never);
 
-    await service.getResolver(createMockContext({ signal: controller.signal }));
+    await expect(
+      service.getResolver(createMockContext({ signal: controller.signal })),
+    ).rejects.toMatchObject({ code: -32011 });
     // A caller walking away says nothing about NVD's health, so the next call retries rather than
     // serving raw identifiers for the whole failure window.
     install();

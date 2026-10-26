@@ -22,6 +22,13 @@
       "version": "0.3.2",
       "environmentVariables": [
         {
+          "name": "NVD_CLAMP_LIMITS",
+          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False restores rejection.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "NVD_API_KEY",
           "description": "NVD API key. Without it, rate limit is 5 req/30s; with it, 50 req/30s. Get one free at nvd.nist.gov/developers/request-an-api-key.",
           "format": "string",
@@ -53,6 +60,13 @@
       "runtimeHint": "npx",
       "version": "0.3.2",
       "environmentVariables": [
+        {
+          "name": "NVD_CLAMP_LIMITS",
+          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False restores rejection.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
         {
           "name": "MCP_TRANSPORT_TYPE",
           "description": "Selects the HTTP transport.",

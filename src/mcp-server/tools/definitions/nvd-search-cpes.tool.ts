@@ -5,6 +5,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  applyReadLimit,
+  readLimitEnrichment,
+  readLimitSchema,
+} from '@/mcp-server/tools/read-limit.js';
 import { getNvdCpeService } from '@/services/nvd-cpe/nvd-cpe-service.js';
 
 const CPE_PREFIX_REGEX = /^cpe:2\.3:/i;
@@ -33,13 +39,9 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
         'Partial CPEv2.3 pattern (e.g., "cpe:2.3:a:apache:http_server"). ' +
           'At least one of keyword or cpeMatchString is required.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(10_000)
-      .default(20)
-      .describe('Maximum number of CPE entries to return (default 20, max 10000).'),
+    limit: readLimitSchema(10000, 20).describe(
+      'Maximum number of CPE entries to return (default 20; values above 10000 are clamped unless NVD_CLAMP_LIMITS is false).',
+    ),
     offset: z
       .number()
       .int()
@@ -81,6 +83,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
   }),
 
   enrichment: {
+    ...readLimitEnrichment,
     totalCount: z.number().describe('Total matching CPE entries before the limit was applied.'),
     returned: z.number().describe('Number of entries returned in this response.'),
     offset: z.number().describe('Page offset used in this query.'),
@@ -99,6 +102,22 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
 
   errors: [
     {
+      reason: 'nvd_invalid_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD returned an unusable response.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Try again later; if the failure persists, report the failing tool call.',
+    },
+    {
+      reason: 'nvd_request_blocked',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The NVD security layer blocked the request.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Rephrase query text, or try again later or from another network.',
+    },
+    {
       reason: 'missing_search_input',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Neither keyword nor cpeMatchString was provided.',
@@ -115,7 +134,7 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
-      when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
+      when: 'NVD explicitly reported that the rate limit was exceeded.',
       retryable: true,
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
@@ -147,9 +166,11 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
     });
 
     const service = getNvdCpeService();
+    const clamped = applyReadLimit(input.limit, 10000, 'nvd_search_cpes', ctx);
+    const notices: string[] = clamped.notice ? [clamped.notice] : [];
     const result = await service.searchCpes(
       {
-        limit: input.limit,
+        limit: clamped.limit,
         offset: input.offset,
         ...(input.keyword && { keyword: input.keyword }),
         ...(input.cpeMatchString && { cpeMatchString: input.cpeMatchString }),
@@ -166,26 +187,27 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
        * matched" is true — say so rather than sending the caller after a mistake they did not make.
        */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
-        ctx.enrich.notice(
+        notices.push(
           `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
         );
       } else if (result.totalResults > 0) {
-        ctx.enrich.notice(
+        notices.push(
           `NVD reported ${result.totalResults} match(es) but returned no entries at offset ${input.offset}, which is inside that range. Retry the query; the offset is not the problem.`,
         );
       } else {
-        ctx.enrich.notice('No CPEs matched. Try a broader keyword or different spelling.');
+        notices.push('No CPEs matched. Try a broader keyword or different spelling.');
       }
     } else if (result.totalResults > result.offset + result.returned) {
       /**
        * A vendor-level keyword is already as specific as the vendor gets, so "narrow the keyword"
        * has no move behind it — point at the offset that actually reaches the remainder.
        */
-      ctx.enrich.notice(
+      notices.push(
         `Results truncated — ${result.totalResults} entries match; set offset to ${result.offset + result.returned} for the next page.`,
       );
     }
 
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     return { cpes: result.cpes };
   },
 
@@ -198,15 +220,15 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
 
     for (const cpe of result.cpes) {
       const depFlag = cpe.deprecated ? ' *(deprecated)*' : '';
-      lines.push(`### ${cpe.title ?? cpe.cpeName}${depFlag}`);
-      lines.push(`**CPE Name:** \`${cpe.cpeName}\``);
+      lines.push(`### ${escapeMarkdownInline(cpe.title ?? cpe.cpeName)}${depFlag}`);
+      lines.push(`**CPE Name:** ${escapeMarkdownInline(cpe.cpeName)}`);
 
       if (cpe.deprecated && cpe.deprecatedBy && cpe.deprecatedBy.length > 0) {
-        lines.push(`**Deprecated By:** ${cpe.deprecatedBy.join(', ')}`);
+        lines.push(`**Deprecated By:** ${cpe.deprecatedBy.map(escapeMarkdownInline).join(', ')}`);
       }
 
       if (cpe.lastModified) {
-        lines.push(`**Last Modified:** ${cpe.lastModified}`);
+        lines.push(`**Last Modified:** ${escapeMarkdownInline(cpe.lastModified)}`);
       }
 
       lines.push('');

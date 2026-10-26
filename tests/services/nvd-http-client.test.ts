@@ -286,4 +286,135 @@ describe('NvdHttpClient', () => {
     expect(headersOf(0).apiKey).toBe(API_KEY);
     expect(headersOf(1).apiKey).toBeUndefined();
   });
+
+  it.each([
+    ['caller', 200],
+    ['deadline', 200],
+    ['caller', 403],
+    ['deadline', 403],
+  ] as const)(
+    'keeps %s cancellation attached while consuming a %i body and releases the queue',
+    async (mode, status) => {
+      const caller = new AbortController();
+      let finishBody: (() => void) | undefined;
+      let fetchSignal: AbortSignal | undefined;
+      const mock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+        if (mock.mock.calls.length > 1) return new Response('{}');
+        fetchSignal = init?.signal ?? undefined;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              finishBody = () => {
+                controller.enqueue(new TextEncoder().encode('{}'));
+                controller.close();
+              };
+              fetchSignal?.addEventListener(
+                'abort',
+                () => controller.error(new DOMException('Aborted', 'AbortError')),
+                { once: true },
+              );
+            },
+          }),
+          { status },
+        );
+      });
+      vi.stubGlobal('fetch', mock);
+      const client = new NvdHttpClient(undefined, 100);
+      const first = settled(
+        client.get('cves/2.0', {}, createMockContext({ signal: caller.signal }), { maxRetries: 0 }),
+      );
+      const next = settled(client.get('cves/2.0', {}, createMockContext(), { maxRetries: 0 }));
+      await vi.advanceTimersByTimeAsync(0);
+      if (mode === 'caller') caller.abort();
+      await vi.advanceTimersByTimeAsync(101);
+      const aborted = fetchSignal?.aborted;
+      if (!aborted) finishBody?.();
+      await drainClock();
+      expect(aborted).toBe(true);
+      expect(await first).toMatchObject({
+        code: mode === 'caller' ? JsonRpcErrorCode.RequestCancelled : JsonRpcErrorCode.Timeout,
+      });
+      expect(await next).toEqual({});
+      expect(mock).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('classifies caller cancellation before headers as RequestCancelled', async () => {
+    const caller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_input: unknown, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true },
+            );
+          }),
+      ),
+    );
+    const result = settled(
+      new NvdHttpClient(undefined, 100).get(
+        'cves/2.0',
+        {},
+        createMockContext({ signal: caller.signal }),
+        { maxRetries: 0 },
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    caller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await result).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('classifies a blocked request without retrying or delaying the queue beyond pacing', async () => {
+    const { at, mock } = stubFetch((index) =>
+      index === 0
+        ? new Response('<html>Sorry, you have been blocked</html>', {
+            status: 403,
+            headers: { 'Content-Type': 'text/html' },
+          })
+        : new Response('{}'),
+    );
+    const client = new NvdHttpClient(API_KEY, 100);
+    const first = settled(client.get('cves/2.0', {}, createMockContext()));
+    const next = settled(client.get('cves/2.0', {}, createMockContext()));
+    await drainClock();
+    expect(await first).toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'nvd_request_blocked', retryable: false },
+    });
+    expect(await next).toEqual({});
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(gapBetween(at, 0, 1)).toBe(600);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { body: '', headers: { 'Retry-After': '30' } },
+    { body: '{}', headers: { 'Retry-After': '30', 'Content-Type': 'application/json' } },
+    {
+      body: '<html>Sorry, you have been blocked</html>',
+      headers: { 'Retry-After': '30', 'Content-Type': 'text/html' },
+    },
+    { body: 'Rate limit exceeded', headers: {} },
+    { body: '<html>Other error</html>', headers: { 'Content-Type': 'text/html' } },
+  ])('preserves ordinary 403 backoff for %j', async ({ body, headers }) => {
+    const { at } = stubFetch((index) =>
+      index === 0 ? new Response(body, { status: 403, headers }) : new Response('{}'),
+    );
+    const client = new NvdHttpClient(undefined, 100);
+    const first = settled(client.get('cves/2.0', {}, createMockContext()));
+    const next = settled(client.get('cves/2.0', {}, createMockContext()));
+    await drainClock();
+    expect(await first).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: 30 },
+    });
+    expect(await next).toEqual({});
+    expect(gapBetween(at, 0, 1)).toBe(WINDOW_MS);
+  });
 });

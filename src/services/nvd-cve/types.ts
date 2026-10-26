@@ -3,106 +3,170 @@
  * @module services/nvd-cve/types
  */
 
-/**
- * Raw CVSS metric from the NVD API response.
- *
- * `baseSeverity` appears at one of two depths depending on the metric array: `cvssMetricV2`
- * carries it here, as a sibling of `cvssData`, while `cvssMetricV30`/`V31`/`V40` carry it inside
- * `cvssData`. Both are declared so neither shape has to be inferred from the score.
- */
-export interface RawCvssMetric {
-  baseSeverity?: string;
-  cvssData?: {
-    version?: string;
-    vectorString?: string;
-    baseScore?: number;
-    baseSeverity?: string;
-  };
-  exploitabilityScore?: number;
-  impactScore?: number;
-  source?: string;
-  type?: string;
-}
+import { z } from '@cyanheads/mcp-ts-core';
+
+const rawCvssMetricSchema = z.looseObject({
+  baseSeverity: z.string().optional(),
+  cvssData: z
+    .looseObject({
+      version: z.string().optional(),
+      vectorString: z.string().optional(),
+      baseScore: z.number().optional(),
+      baseSeverity: z.string().optional(),
+    })
+    .optional(),
+  exploitabilityScore: z.number().optional(),
+  impactScore: z.number().optional(),
+  source: z.string().optional(),
+  type: z.string().optional(),
+});
+
+/** Raw CVSS metric; v2 severity can be beside cvssData instead of inside it. */
+export type RawCvssMetric = z.infer<typeof rawCvssMetricSchema>;
+
+/** SSVC assessments carry source outside the versioned assessment data. */
+export const rawSsvcMetricsSchema = z.array(
+  z.looseObject({
+    source: z.string(),
+    ssvcData: z.looseObject({
+      role: z.string(),
+      version: z.string(),
+      timestamp: z.string().optional(),
+      options: z.array(z.record(z.string(), z.union([z.string(), z.array(z.string())]))),
+    }),
+  }),
+);
+
+/** Current SSVC assessment with decision-point order and repeated keys preserved. */
+export type SsvcAssessment = {
+  source: string;
+  role: string;
+  version: string;
+  timestamp?: string;
+  decisionPoints: z.infer<typeof rawSsvcMetricsSchema>[number]['ssvcData']['options'];
+};
 
 /** Raw CVE item from the NVD API response. */
-export interface RawCveItem {
-  cisaActionDue?: string;
-  cisaExploitAdd?: string;
-  cisaRequiredAction?: string;
-  cisaVulnerabilityName?: string;
-  configurations?: Array<{
-    /** Combines this group's sibling nodes — an `AND` means every node must match. */
-    operator?: string;
-    nodes?: Array<{
-      operator?: string;
-      negate?: boolean;
-      cpeMatch?: Array<{
-        vulnerable?: boolean;
-        criteria?: string;
-        versionStartIncluding?: string;
-        versionStartExcluding?: string;
-        versionEndIncluding?: string;
-        versionEndExcluding?: string;
-        matchCriteriaId?: string;
-      }>;
-    }>;
-  }>;
-  descriptions?: Array<{ lang?: string; value?: string }>;
-  id?: string;
-  lastModified?: string;
-  metrics?: {
-    cvssMetricV2?: RawCvssMetric[];
-    cvssMetricV30?: RawCvssMetric[];
-    cvssMetricV31?: RawCvssMetric[];
-    cvssMetricV40?: RawCvssMetric[];
-  };
-  published?: string;
-  references?: Array<{ url?: string; source?: string; tags?: string[] }>;
-  sourceIdentifier?: string;
-  vulnStatus?: string;
-  weaknesses?: Array<{
-    source?: string;
-    type?: string;
-    description?: Array<{ lang?: string; value?: string }>;
-  }>;
-}
+const rawCveItemSchema = z.looseObject({
+  cisaActionDue: z.string().optional(),
+  cisaExploitAdd: z.string().optional(),
+  cisaRequiredAction: z.string().optional(),
+  cisaVulnerabilityName: z.string().optional(),
+  configurations: z
+    .array(
+      z.looseObject({
+        operator: z.string().optional(),
+        nodes: z
+          .array(
+            z.looseObject({
+              operator: z.string().optional(),
+              negate: z.boolean().optional(),
+              cpeMatch: z
+                .array(
+                  z.looseObject({
+                    vulnerable: z.boolean().optional(),
+                    criteria: z.string().optional(),
+                    versionStartIncluding: z.string().optional(),
+                    versionStartExcluding: z.string().optional(),
+                    versionEndIncluding: z.string().optional(),
+                    versionEndExcluding: z.string().optional(),
+                    matchCriteriaId: z.string().optional(),
+                  }),
+                )
+                .optional(),
+            }),
+          )
+          .optional(),
+      }),
+    )
+    .optional(),
+  descriptions: z
+    .array(z.looseObject({ lang: z.string().optional(), value: z.string().optional() }))
+    .optional(),
+  id: z.string(),
+  lastModified: z.string().optional(),
+  metrics: z
+    .looseObject({
+      cvssMetricV2: z.array(rawCvssMetricSchema).optional(),
+      cvssMetricV30: z.array(rawCvssMetricSchema).optional(),
+      cvssMetricV31: z.array(rawCvssMetricSchema).optional(),
+      cvssMetricV40: z.array(rawCvssMetricSchema).optional(),
+    })
+    .optional(),
+  published: z.string().optional(),
+  references: z
+    .array(
+      z.looseObject({
+        url: z.string().optional(),
+        source: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+      }),
+    )
+    .optional(),
+  sourceIdentifier: z.string().optional(),
+  vulnStatus: z.string().optional(),
+  weaknesses: z
+    .array(
+      z.looseObject({
+        source: z.string().optional(),
+        type: z.string().optional(),
+        description: z
+          .array(z.looseObject({ lang: z.string().optional(), value: z.string().optional() }))
+          .optional(),
+      }),
+    )
+    .optional(),
+});
+
+/** Validated CVE identity with optional upstream enrichment and unknown fields preserved. */
+export type RawCveItem = z.infer<typeof rawCveItemSchema>;
 
 /** Raw NVD CVE search response. */
-export interface RawCveResponse {
-  format?: string;
-  resultsPerPage?: number;
-  startIndex?: number;
-  timestamp?: string;
-  totalResults?: number;
-  version?: string;
-  vulnerabilities?: Array<{ cve?: RawCveItem }>;
-}
+export const rawCveResponseSchema = z.looseObject({
+  format: z.string().optional(),
+  resultsPerPage: z.number().optional(),
+  startIndex: z.number().optional(),
+  timestamp: z.string().optional(),
+  totalResults: z.number(),
+  version: z.string().optional(),
+  vulnerabilities: z.array(z.looseObject({ cve: rawCveItemSchema })),
+});
+
+/** Parsed NVD CVE envelope. */
+export type RawCveResponse = z.infer<typeof rawCveResponseSchema>;
 
 /** Raw NVD CVE History response. */
-export interface RawCveHistoryResponse {
-  cveChanges?: Array<{
-    change?: {
-      cveId?: string;
-      eventName?: string;
-      cveChangeId?: string;
-      sourceIdentifier?: string;
-      created?: string;
-      /**
-       * `oldValue`/`newValue` are usually strings, but NVD emits an array for `Affected` details
-       * and an object for `SSVC` details — normalization serializes those to JSON.
-       */
-      details?: Array<{
-        action?: string;
-        type?: string;
-        oldValue?: unknown;
-        newValue?: unknown;
-      }>;
-    };
-  }>;
-  resultsPerPage?: number;
-  startIndex?: number;
-  totalResults?: number;
-}
+export const rawCveHistoryResponseSchema = z.looseObject({
+  cveChanges: z.array(
+    z.looseObject({
+      change: z
+        .looseObject({
+          cveId: z.string().optional(),
+          eventName: z.string().optional(),
+          cveChangeId: z.string().optional(),
+          sourceIdentifier: z.string().optional(),
+          created: z.string().optional(),
+          details: z
+            .array(
+              z.looseObject({
+                action: z.string().optional(),
+                type: z.string().optional(),
+                oldValue: z.unknown().optional(),
+                newValue: z.unknown().optional(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
+    }),
+  ),
+  resultsPerPage: z.number().optional(),
+  startIndex: z.number().optional(),
+  totalResults: z.number(),
+});
+
+/** Parsed history envelope; detail values retain structured upstream data. */
+export type RawCveHistoryResponse = z.infer<typeof rawCveHistoryResponseSchema>;
 
 /** Normalized CVSS score entry. */
 export interface CvssScore {
@@ -144,6 +208,7 @@ export interface CisaKev {
  * index signature that assignment needs — an interface would force a cast and lose the field check.
  */
 export type CveRecord = {
+  ssvc?: SsvcAssessment[];
   cisaKev?: CisaKev;
   /**
    * Upstream's `configurations[].nodes[]` with the group level hoisted away: one entry per node,

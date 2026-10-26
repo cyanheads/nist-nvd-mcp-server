@@ -14,7 +14,7 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
   description:
     'Fetch a single CVE record by ID from the NIST NVD via a stable URI. ' +
     'Returns the same full data as nvd_get_cve for a single ID: CVSS scores, CWE weaknesses, ' +
-    'CPE configurations, CISA KEV fields, and references.',
+    'CPE configurations, CISA KEV fields, current SSVC assessments, and references.',
   mimeType: 'application/json',
 
   params: z.object({
@@ -24,6 +24,31 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
   }),
 
   errors: [
+    {
+      reason: 'nvd_invalid_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD returned an unusable response.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Try again later; if the failure persists, report the failing tool call.',
+    },
+    {
+      reason: 'nvd_request_blocked',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The NVD security layer blocked the request.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Rephrase query text, or try again later or from another network.',
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'NVD explicitly reported that the rate limit was exceeded.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery:
+        'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
+    },
     {
       reason: 'invalid_cve_id_format',
       code: JsonRpcErrorCode.ValidationError,

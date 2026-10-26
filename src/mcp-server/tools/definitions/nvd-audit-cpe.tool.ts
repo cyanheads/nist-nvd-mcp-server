@@ -5,18 +5,18 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
+import { flattenCpeMatches, summarizeCpeNodes } from '@/mcp-server/tools/formatting/cpe-match.js';
+import { formatSsvc } from '@/mcp-server/tools/formatting/ssvc.js';
 import {
-  CPE_MATCH_CAP,
-  flattenCpeMatches,
-  summarizeCpeNodes,
-} from '@/mcp-server/tools/formatting/cpe-match.js';
+  applyReadLimit,
+  readLimitEnrichment,
+  readLimitSchema,
+} from '@/mcp-server/tools/read-limit.js';
 import { CveRecordSchema } from '@/mcp-server/tools/schemas/full-cve.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
 const CPE_V23_REGEX = /^cpe:2\.3:/i;
-
-/** References rendered per CVE — this tool returns full records for many CVEs at once. */
-const REFERENCE_CAP = 5;
 
 export const nvdAuditCpe = tool('nvd_audit_cpe', {
   title: 'Audit CPE for Vulnerabilities',
@@ -25,7 +25,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     'Requires either an exact CPE name (cpeName) or a partial match string (virtualMatchString) with optional version range bounds. ' +
     'With cpeName, NVD scopes results to configurations where the product is directly vulnerable, not merely referenced as a dependency. ' +
     'Use nvd_search_cpes first to resolve the correct CPE string for a product. ' +
-    'Returns full CVE records.',
+    'Returns full CVE records including current SSVC assessments.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -60,21 +60,25 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
       .optional()
       .describe(
-        'Filter out CVEs below this severity level. Applied after NVD returns the page, so it can only drop CVEs within limit — raise limit to widen what it sees.',
+        'Keep CVEs whose highest severity band across all CVSS versions meets this threshold, which can exceed the row headline severity. Applied after NVD returns the page, so only CVEs within limit are evaluated.',
       ),
+    includeConfigurations: z
+      .boolean()
+      .default(true)
+      .describe('When false, omits configurationNodes from each record and its rendered text.'),
+    includeReferences: z
+      .boolean()
+      .default(true)
+      .describe('When false, omits references from each record and its rendered text.'),
     allLanguages: z
       .boolean()
       .default(false)
       .describe(
         'When true, keeps every localized description NVD supplies on each record. Default keeps English only.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(2000)
-      .default(20)
-      .describe('Maximum number of CVEs to return (default 20, max 2000).'),
+    limit: readLimitSchema(2000, 20).describe(
+      'Maximum number of CVEs to return (default 20; values above 2000 are clamped unless NVD_CLAMP_LIMITS is false).',
+    ),
     offset: z
       .number()
       .int()
@@ -89,12 +93,15 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   output: z.object({
     cves: z
       .array(
-        CveRecordSchema.describe('Full CVE record for one vulnerability affecting the product.'),
+        CveRecordSchema.partial({ configurationNodes: true }).describe(
+          'CVE record for one vulnerability affecting the product; configurations and references can be omitted by caller selectors.',
+        ),
       )
       .describe('Full CVE records for CVEs affecting the specified product.'),
   }),
 
   enrichment: {
+    ...readLimitEnrichment,
     totalCount: z.number().describe('Total CVEs matched before pagination.'),
     returned: z.number().describe('Number of CVE records returned.'),
     offset: z.number().describe('Page offset used in this query.'),
@@ -107,7 +114,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
       .number()
       .optional()
       .describe(
-        'CVEs dropped by the severityMin filter from the page NVD returned. Present whenever severityMin is set; 0 means the filter dropped nothing, so a narrow result reflects totalCount and limit instead. This is not totalCount minus returned — CVEs beyond limit were never fetched and so were never evaluated against the filter.',
+        'CVEs below severityMin on every CVSS band, or with no scores, on the page NVD returned. Present whenever severityMin is set; 0 means none were dropped. Bands across all versions are evaluated independently of the row headline; CVEs beyond limit were not evaluated.',
       ),
     notice: z
       .string()
@@ -126,6 +133,22 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
   },
 
   errors: [
+    {
+      reason: 'nvd_invalid_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD returned an invalid response.',
+      thrownBy: 'service',
+      retryable: false,
+      recovery: 'Retry later; report a persistent invalid NVD response.',
+    },
+    {
+      reason: 'nvd_request_blocked',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'NVD blocked the request.',
+      thrownBy: 'service',
+      retryable: false,
+      recovery: 'Rephrase query text; otherwise try later or use another network.',
+    },
     {
       reason: 'missing_cpe_input',
       code: JsonRpcErrorCode.ValidationError,
@@ -156,7 +179,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
-      when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
+      when: 'NVD explicitly reported that the rate limit was exceeded.',
       retryable: true,
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
@@ -204,6 +227,8 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     });
 
     const service = getNvdCveService();
+    const clamped = applyReadLimit(input.limit, 2000, 'nvd_audit_cpe', ctx);
+    const notices: string[] = clamped.notice ? [clamped.notice] : [];
     const result = await service.auditCpe(
       {
         ...(input.cpeName && { cpeName: input.cpeName }),
@@ -214,7 +239,7 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         versionEndType: input.versionEndType,
         ...(input.severityMin && { severityMin: input.severityMin }),
         allLanguages: input.allLanguages,
-        limit: input.limit,
+        limit: clamped.limit,
         offset: input.offset,
       },
       ctx,
@@ -241,20 +266,20 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
        * every branch exists to keep the caller from being sent after a mistake they did not make.
        */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
-        ctx.enrich.notice(
+        notices.push(
           `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
         );
       } else if (input.severityMin && result.filteredCount > 0) {
-        ctx.enrich.notice(
+        notices.push(
           `All ${result.filteredCount} CVE(s) on the fetched page scored below ${input.severityMin}. ` +
             'Lower severityMin or raise limit to widen the page NVD returns.',
         );
       } else if (result.totalResults > 0) {
-        ctx.enrich.notice(
+        notices.push(
           `NVD reported ${result.totalResults} CVE(s) for this audit target but returned none at offset ${input.offset}, which is inside that range. Retry the query; neither the offset nor the audit target is the problem.`,
         );
       } else {
-        ctx.enrich.notice(
+        notices.push(
           'No CVEs in NVD for this audit target — a clean audit, not a failed one. ' +
             'If that is unexpected, confirm the CPE string with nvd_search_cpes: it is the one input this audit cannot verify on its own.',
         );
@@ -267,12 +292,23 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
        * actually spent index positions on, and collapses to `returned` when no filter is set.
        */
       const consumed = result.returned + result.filteredCount;
-      ctx.enrich.notice(
+      notices.push(
         `Results truncated — ${result.totalResults} CVEs match this audit target; set offset to ${result.offset + consumed} for the next page.`,
       );
     }
 
-    return { cves: result.cves };
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    const cves =
+      input.includeConfigurations && input.includeReferences
+        ? result.cves
+        : result.cves.map((cve) => {
+            const { configurationNodes: _configurationNodes, ...withoutConfigurations } = cve;
+            const selected = input.includeConfigurations ? cve : withoutConfigurations;
+            if (input.includeReferences) return selected;
+            const { references: _references, ...withoutReferences } = selected;
+            return withoutReferences;
+          });
+    return { cves };
   },
 
   format: (result) => {
@@ -283,14 +319,14 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
     }
 
     for (const cve of result.cves) {
-      lines.push(`## ${cve.cveId}`);
+      lines.push(`## ${escapeMarkdownInline(cve.cveId)}`);
       lines.push(
-        `**Status:** ${cve.vulnStatus} | **Published:** ${cve.published} | **Last Modified:** ${cve.lastModified}`,
+        `**Status:** ${escapeMarkdownInline(cve.vulnStatus)} | **Published:** ${escapeMarkdownInline(cve.published)} | **Last Modified:** ${escapeMarkdownInline(cve.lastModified)}`,
       );
 
       if (cve.severity) {
         lines.push(
-          `**Severity:** ${cve.severity.label} (${cve.severity.score}) from CVSS ${cve.severity.fromVersion}`,
+          `**Severity:** ${escapeMarkdownInline(cve.severity.label)} (${cve.severity.score}) from CVSS ${escapeMarkdownInline(cve.severity.fromVersion)}`,
         );
       } else {
         lines.push('**Severity:** Not available (no CVSS scores)');
@@ -300,8 +336,8 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         lines.push('**CVSS Scores:**');
         for (const s of cve.cvssScores) {
           lines.push(
-            `  - v${s.version} (${s.sourceType}): ${s.baseScore} ${s.severity}` +
-              (s.vectorString ? ` — ${s.vectorString}` : ''),
+            `  - v${escapeMarkdownInline(s.version)} (${escapeMarkdownInline(s.sourceType)}): ${s.baseScore} ${escapeMarkdownInline(s.severity)}` +
+              (s.vectorString ? ` — ${escapeMarkdownInline(s.vectorString)}` : ''),
           );
         }
       }
@@ -310,42 +346,41 @@ export const nvdAuditCpe = tool('nvd_audit_cpe', {
         lines.push('**Weaknesses:**');
         for (const w of cve.weaknesses) {
           if (w.cweIds.length > 0) {
-            lines.push(`  - ${w.source}: ${w.cweIds.join(', ')}`);
+            lines.push(
+              `  - ${escapeMarkdownInline(w.source)}: ${w.cweIds.map(escapeMarkdownInline).join(', ')}`,
+            );
           }
         }
       }
 
+      if (cve.ssvc) lines.push(...formatSsvc(cve.ssvc));
+
       // Descriptions — render lang and value for all entries to satisfy format-parity
       for (const desc of cve.descriptions) {
-        const truncated = desc.value.length > 300 ? `${desc.value.slice(0, 300)}…` : desc.value;
-        lines.push(`\n[${desc.lang}] ${truncated}`);
+        lines.push(`\n[${escapeMarkdownInline(desc.lang)}] ${escapeMarkdownInline(desc.value)}`);
       }
 
       if (cve.cisaKev) {
-        lines.push(`\n**CISA KEV:** ${cve.cisaKev.vulnerabilityName}`);
-        lines.push(`  - Added: ${cve.cisaKev.exploitAddDate}`);
-        lines.push(`  - Action Due: ${cve.cisaKev.actionDueDate}`);
-        lines.push(`  - Required Action: ${cve.cisaKev.requiredAction}`);
+        lines.push(`\n**CISA KEV:** ${escapeMarkdownInline(cve.cisaKev.vulnerabilityName)}`);
+        lines.push(`  - Added: ${escapeMarkdownInline(cve.cisaKev.exploitAddDate)}`);
+        lines.push(`  - Action Due: ${escapeMarkdownInline(cve.cisaKev.actionDueDate)}`);
+        lines.push(`  - Required Action: ${escapeMarkdownInline(cve.cisaKev.requiredAction)}`);
       }
 
       if (cve.configurationNodes && cve.configurationNodes.length > 0) {
         const matches = flattenCpeMatches(cve.configurationNodes);
         lines.push(`**Configurations:** ${summarizeCpeNodes(cve.configurationNodes)}`);
-        for (const match of matches.slice(0, CPE_MATCH_CAP)) lines.push(`  - ${match}`);
-        if (matches.length > CPE_MATCH_CAP) {
-          lines.push(`  - … ${matches.length - CPE_MATCH_CAP} more`);
-        }
+        for (const match of matches) lines.push(`  - ${match}`);
       }
 
       if (cve.references && cve.references.length > 0) {
         lines.push(`**References (${cve.references.length}):**`);
-        for (const ref of cve.references.slice(0, REFERENCE_CAP)) {
-          const sourcePart = ref.source ? ` [${ref.source}]` : '';
-          const tagPart = ref.tags?.length ? ` (${ref.tags.join(', ')})` : '';
-          lines.push(`  - ${ref.url}${sourcePart}${tagPart}`);
-        }
-        if (cve.references.length > REFERENCE_CAP) {
-          lines.push(`  - … ${cve.references.length - REFERENCE_CAP} more`);
+        for (const ref of cve.references) {
+          const sourcePart = ref.source ? ` [${escapeMarkdownInline(ref.source)}]` : '';
+          const tagPart = ref.tags?.length
+            ? ` (${ref.tags.map(escapeMarkdownInline).join(', ')})`
+            : '';
+          lines.push(`  - ${markdownLink(ref.url, ref.url)}${sourcePart}${tagPart}`);
         }
       }
 

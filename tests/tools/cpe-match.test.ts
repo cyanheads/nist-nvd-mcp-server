@@ -7,9 +7,9 @@
  * @module tests/tools/cpe-match.test
  */
 
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { describe, expect, it } from 'vitest';
 import {
-  CPE_MATCH_CAP,
   type CpeConfigurationNode,
   flattenCpeMatches,
   formatCpeMatch,
@@ -30,7 +30,8 @@ describe('formatCpeMatch', () => {
     const match = { criteria: 'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*', vulnerable: true };
 
     expect(formatCpeMatch(match, node([match]))).toBe(
-      'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:* [group 0; vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*') +
+        ' [group 0; vulnerable component]',
     );
   });
 
@@ -118,22 +119,22 @@ describe('flattenCpeMatches', () => {
     expect(at(lines, 2)).toContain('not the vulnerable component');
     // The second group's node must inherit neither the first group's AND nor its node operator.
     expect(at(lines, 3)).toBe(
-      'cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:* [group 1; vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*') +
+        ' [group 1; vulnerable component]',
     );
   });
 
-  it('flattens past the render cap so the caller can disclose what it dropped', () => {
+  it('flattens every criterion in a dense node', () => {
     const nodes = [
       node(
-        Array.from({ length: CPE_MATCH_CAP + 3 }, (_, i) => ({
+        Array.from({ length: 8 }, (_, i) => ({
           criteria: `cpe:2.3:o:fedoraproject:fedora:${30 + i}:*:*:*:*:*:*:*`,
           vulnerable: true,
         })),
       ),
     ];
 
-    // The helper caps nothing itself — the count is what the caller's trailer is computed from.
-    expect(flattenCpeMatches(nodes)).toHaveLength(CPE_MATCH_CAP + 3);
+    expect(flattenCpeMatches(nodes)).toHaveLength(8);
   });
 });
 

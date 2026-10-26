@@ -3,12 +3,13 @@
  * @module tests/tools/nvd-search-cves.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord } from '@/services/nvd-cve/types.js';
+import { nvdRequestRejected } from '@/services/nvd-http/nvd-http-client.js';
 import { at } from '../support/at.js';
 
 const BRIEF_CVE: BriefCveRecord = {
@@ -23,6 +24,11 @@ const BRIEF_CVE_NO_SEVERITY: BriefCveRecord = {
   vulnStatus: 'Awaiting Analysis',
   published: '2022-01-01T00:00:00.000',
 };
+
+/** Every text block, including enrichment and error recovery. */
+function resultText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
+}
 
 /** Shellshock shape: v2 headline (HIGH 10.0) diverges from the v3 filter version (CRITICAL 9.8). */
 const BRIEF_CVE_DIVERGENT: BriefCveRecord = {
@@ -526,6 +532,180 @@ describe('nvdSearchCves', () => {
 
     expect(text).toContain('CVE-2022-00001');
     expect(text).not.toContain('undefined');
+  });
+});
+
+describe('nvdSearchCves — effective filter context', () => {
+  const mockService = { searchCves: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(mockService as never);
+    mockService.searchCves.mockReset();
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['nvd_invalid_response', JsonRpcErrorCode.ServiceUnavailable, 'Try again later'],
+    ['nvd_request_blocked', JsonRpcErrorCode.Forbidden, 'Rephrase'],
+  ] as const)('renders recovery for %s at the tool boundary', async (reason, code, hint) => {
+    mockService.searchCves.mockRejectedValue(
+      new McpError(code, 'NVD request failed.', { reason, retryable: false }),
+    );
+    const result = await runToolContract(nvdSearchCves, { keyword: 'log4j' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code,
+        data: { reason, retryable: false, recovery: { hint: expect.stringContaining(hint) } },
+      },
+    });
+    expect(resultText(result)).toContain(hint);
+  });
+
+  it('keeps an omitted filter absent without an ignored-field notice', async () => {
+    const result = await runToolContract(nvdSearchCves, {});
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('filtersApplied');
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(mockService.searchCves).toHaveBeenCalledWith(
+      expect.not.objectContaining({ keyword: expect.anything() }),
+      expect.anything(),
+    );
+  });
+
+  it('echoes both explicit date pairs on both surfaces', async () => {
+    const dates = {
+      pubStartDate: '2024-01-01T00:00:00.000Z',
+      pubEndDate: '2024-01-02T00:00:00.000Z',
+      lastModStartDate: '2024-02-01T00:00:00.000Z',
+      lastModEndDate: '2024-02-02T00:00:00.000Z',
+    };
+    const result = await runToolContract(nvdSearchCves, dates);
+    expect(result.structuredContent).toHaveProperty('filtersApplied', dates);
+    expect(mockService.searchCves).toHaveBeenCalledWith(
+      expect.objectContaining(dates),
+      expect.anything(),
+    );
+    for (const [key, value] of Object.entries(dates))
+      expect(resultText(result)).toContain(`${key}=${value}`);
+  });
+
+  it('echoes expanded and clamped windows and permits their exact replay', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-25T12:00:00.000Z'));
+    const dates = {
+      pubStartDate: '2026-06-27T12:00:00.000Z',
+      pubEndDate: '2026-10-25T12:00:00.000Z',
+      lastModStartDate: '2026-10-11T12:00:00.000Z',
+      lastModEndDate: '2026-10-25T12:00:00.000Z',
+    };
+    const result = await runToolContract(nvdSearchCves, { pubDays: 200, lastModDays: 14 });
+    expect(result.structuredContent).toHaveProperty('filtersApplied', dates);
+    expect(result.structuredContent).toHaveProperty('datesClamped', [
+      { param: 'pubDays', original: 200, clamped: 120 },
+    ]);
+    for (const [key, value] of Object.entries(dates))
+      expect(resultText(result)).toContain(`${key}=${value}`);
+    await runToolContract(nvdSearchCves, dates);
+    expect(mockService.searchCves.mock.calls[1]?.[0]).toEqual(
+      mockService.searchCves.mock.calls[0]?.[0],
+    );
+  });
+
+  it.each([
+    'keyword',
+    'cweId',
+    'pubStartDate',
+    'pubEndDate',
+    'lastModStartDate',
+    'lastModEndDate',
+  ] as const)('discloses blank %s without forwarding it', async (field) => {
+    for (const value of ['', ' \t\n ']) {
+      mockService.searchCves.mockClear();
+      const result = await runToolContract(nvdSearchCves, { [field]: value });
+      expect(result.isError).not.toBe(true);
+      expect(mockService.searchCves.mock.calls[0]?.[0]).not.toHaveProperty(field);
+      expect(result.structuredContent).not.toHaveProperty('filtersApplied');
+      expect(result.structuredContent).toHaveProperty('notice', `Ignored empty ${field}.`);
+      expect(resultText(result)).toContain(`Ignored empty ${field}.`);
+    }
+  });
+
+  it('normalizes nonblank filters before forwarding and echoing', async () => {
+    const result = await runToolContract(nvdSearchCves, {
+      keyword: '  log4j  ',
+      cweId: ' CWE-79 ',
+      pubStartDate: ' 2024-01-01T00:00:00.000Z ',
+      pubEndDate: ' 2024-01-02T00:00:00.000Z ',
+    });
+    const effective = {
+      keyword: 'log4j',
+      cweId: 'CWE-79',
+      pubStartDate: '2024-01-01T00:00:00.000Z',
+      pubEndDate: '2024-01-02T00:00:00.000Z',
+    };
+    expect(mockService.searchCves).toHaveBeenCalledWith(
+      expect.objectContaining(effective),
+      expect.anything(),
+    );
+    expect(result.structuredContent).toHaveProperty('filtersApplied', effective);
+  });
+
+  it.each([
+    [{ exactPhrase: true, keyword: ' ' }, 'exact_phrase_without_keyword'],
+    [{ pubStartDate: ' ', pubEndDate: '2024-01-02T00:00:00.000Z' }, 'missing_date_pair'],
+  ] as const)('preserves companion checks after blank normalization', async (input, reason) => {
+    const result = await runToolContract(nvdSearchCves, input);
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason } } });
+    expect(mockService.searchCves).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ cves: [BRIEF_CVE], totalResults: 2, returned: 1, offset: 0 }, 'set offset to 1'],
+    [{ cves: [], totalResults: 0, returned: 0, offset: 0 }, 'No CVEs matched'],
+    [{ cves: [], totalResults: 1, returned: 0, offset: 2 }, 'past the end'],
+  ])('keeps paging and empty-result guidance alongside ignored fields', async (page, guidance) => {
+    mockService.searchCves.mockResolvedValue(page);
+    const result = await runToolContract(nvdSearchCves, {
+      keyword: '',
+      cweId: ' ',
+      offset: page.offset,
+    });
+    expect(result.structuredContent).toHaveProperty(
+      'notice',
+      expect.stringContaining('Ignored empty keyword, cweId.'),
+    );
+    expect(result.structuredContent).toHaveProperty('notice', expect.stringContaining(guidance));
+    expect(resultText(result)).toContain('Ignored empty keyword, cweId.');
+    expect(resultText(result)).toContain(guidance);
+  });
+
+  it.each([
+    [{ cweId: '79' }, 'Invalid cweId parameter.'],
+    [{ cweId: 'cwe-79' }, 'Invalid cweId parameter.'],
+    [
+      { pubStartDate: '2024-01-01', pubEndDate: '2024-01-02T00:00:00.000Z' },
+      'Invalid ISO 8601 date/time format, see documentation.',
+    ],
+  ])('supplies recovery for NVD-rejected CWE and date forms', async (input, detail) => {
+    mockService.searchCves.mockRejectedValue(nvdRequestRejected('cves/2.0', detail));
+    const result = await runToolContract(nvdSearchCves, input);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'nvd_request_rejected',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('CWE-<number>') },
+        },
+      },
+    });
+    for (const value of ['NVD-CWE-Other', 'NVD-CWE-noinfo', '2024-01-01T00:00:00.000Z'])
+      expect(resultText(result)).toContain(value);
   });
 });
 

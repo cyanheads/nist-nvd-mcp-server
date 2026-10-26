@@ -3,7 +3,9 @@
  * @module tests/resources/nvd-cve.resource.test
  */
 
+import { forbidden, JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdCveResource } from '@/mcp-server/resources/definitions/nvd-cve.resource.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -29,6 +31,64 @@ const FULL_CVE: CveRecord = {
   weaknesses: [{ source: 'NVD', cweIds: ['CWE-20'] }],
   configurationNodes: [],
 };
+
+describe('nvdCveResource JSON-RPC failure contract', () => {
+  it.each([
+    [
+      'nvd_invalid_response',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Try again later; if the failure persists, report the failing tool call.',
+    ],
+    [
+      'nvd_request_blocked',
+      JsonRpcErrorCode.Forbidden,
+      'Rephrase query text, or try again later or from another network.',
+    ],
+  ] as const)('fills %s recovery at resources/read', async (reason, code, hint) => {
+    const error =
+      reason === 'nvd_invalid_response'
+        ? serviceUnavailable('Unusable response', { reason, retryable: false })
+        : forbidden('Blocked request', { reason, retryable: false });
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      fetchById: vi.fn().mockRejectedValue(error),
+    } as never);
+    const worker = createWorkerHandler({
+      name: 'resource-contract-test',
+      resources: [nvdCveResource],
+      sessionMode: 'stateless',
+    });
+    const response = await worker.fetch(
+      new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2025-11-25',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'resources/read',
+          params: { uri: 'nvd://cve/CVE-2024-1709' },
+        }),
+      }),
+      {
+        MCP_AUTH_MODE: 'none',
+        STORAGE_PROVIDER_TYPE: 'in-memory',
+        OTEL_ENABLED: 'false',
+        LOG_LEVEL: 'emerg',
+      },
+      { waitUntil() {} } as never,
+    );
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(body).toContain(reason);
+    expect(body).toContain(hint);
+    expect(body).toContain(String(code));
+    expect(body).toContain('"error":');
+    expect(body).not.toContain('structuredContent');
+  });
+});
 
 /**
  * `params` is optional on a resource definition — this one declares it, and every case below

@@ -24,6 +24,12 @@
     "cvss"
   ],
   "userConfig": {
+    "NVD_CLAMP_LIMITS": {
+      "type": "boolean",
+      "title": "Clamp read limits",
+      "description": "Clamp oversized requests to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False rejects oversized input.",
+      "default": true
+    },
     "NVD_API_KEY": {
       "type": "string",
       "title": "NVD API key",
@@ -38,7 +44,8 @@
       "args": ["-y", "@cyanheads/nist-nvd-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "NVD_API_KEY": "${user_config.NVD_API_KEY}"
+        "NVD_API_KEY": "${user_config.NVD_API_KEY}",
+        "NVD_CLAMP_LIMITS": "${user_config.NVD_CLAMP_LIMITS}"
       }
     }
   }

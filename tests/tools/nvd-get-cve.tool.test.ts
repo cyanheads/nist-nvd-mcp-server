@@ -3,13 +3,13 @@
  * @module tests/tools/nvd-get-cve.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
-import { nvdGetCve, REFERENCE_CAP } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
-import { CPE_MATCH_CAP } from '@/mcp-server/tools/formatting/cpe-match.js';
+import { nvdGetCve } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import { BRIEF_DESCRIPTION_CHARS, NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord, RawCveItem, RawCveResponse } from '@/services/nvd-cve/types.js';
@@ -79,6 +79,143 @@ const SPARSE_CVE: CveRecord = {
  * each pins one rendering concern — so they are built loosely and cast to this at the boundary.
  */
 type GetCveRow = Parameters<NonNullable<typeof nvdGetCve.format>>[0]['cves'][number];
+
+describe('nvdGetCve — full rendering parity', () => {
+  const record: CveRecord = {
+    ...FULL_CVE,
+    descriptions: [
+      { lang: 'en', value: `**literal**\n- ${'detail '.repeat(60)}` },
+      { lang: 'es', value: '<b>texto</b>' },
+    ],
+    configurationNodes: [
+      {
+        groupIndex: 0,
+        groupOperator: 'AND',
+        nodeOperator: 'OR',
+        cpeMatch: Array.from({ length: 8 }, (_, i) => ({
+          vulnerable: i !== 7,
+          criteria: `cpe:2.3:a:vendor:product:${i}:*:*:*:*:*:*:*`,
+          versionEndExcluding: '2`\n[bound]',
+        })),
+      },
+    ],
+    references: Array.from({ length: 17 }, (_, i) => ({
+      url: `https://example.test/${i}?x=[a]`,
+      source: 'name`\n[source]',
+      tags: ['**advisory**'],
+    })),
+  };
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      fetchById: vi
+        .fn()
+        .mockResolvedValue({ cves: [record], returned: 1, requested: 1, missingIds: [] }),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+  });
+  it('characterizes full structured records without trimming nested sections', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: record.cveId, allLanguages: true });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ cves: [record] });
+  });
+  it('omits configurations on both surfaces without mutating full service records (issue #61)', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: record.cveId,
+      includeConfigurations: false,
+    } as never);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      cves: [expect.not.objectContaining({ configurationNodes: expect.anything() })],
+    });
+    expect(
+      result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n'),
+    ).not.toContain('**Configurations:**');
+    expect(record.configurationNodes[0]?.cpeMatch).toHaveLength(8);
+  });
+  it('keeps default and explicit selectors identical (issue #61)', async () => {
+    const defaults = await runToolContract(nvdGetCve, { cveIds: record.cveId });
+    const explicit = await runToolContract(nvdGetCve, {
+      cveIds: record.cveId,
+      includeConfigurations: true,
+      includeReferences: true,
+    } as never);
+    expect(explicit.structuredContent).toEqual(defaults.structuredContent);
+    expect(explicit.content).toEqual(defaults.content);
+  });
+  it('keeps brief mode free of full sections even with configuration selectors (issue #61)', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: record.cveId,
+      brief: true,
+      includeConfigurations: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      brief: true,
+      cves: [expect.not.objectContaining({ configurationNodes: expect.anything() })],
+    });
+    expect(
+      result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n'),
+    ).not.toContain('**Configurations:**');
+  });
+  it('rejects nonboolean configuration selectors (issue #61)', () => {
+    expect(
+      nvdGetCve.input.safeParse({ cveIds: record.cveId, includeConfigurations: 'false' }).success,
+    ).toBe(false);
+  });
+  it('renders every reference, nested criterion and language without losing literal text', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: record.cveId, allLanguages: true });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    for (const reference of record.references!)
+      expect(text).toContain(markdownLink(reference.url, reference.url));
+    for (const match of record.configurationNodes[0]!.cpeMatch)
+      expect(text).toContain(escapeMarkdownInline(match.criteria));
+    for (const description of record.descriptions)
+      expect(text).toContain(escapeMarkdownInline(description.value));
+    expect(text).toContain(escapeMarkdownInline('name`\n[source]'));
+    expect(text).toContain(escapeMarkdownInline('**advisory**'));
+    expect(text).toContain(escapeMarkdownInline('2`\n[bound]'));
+    expect(text).toContain('AND with sibling nodes; OR within node; not the vulnerable component');
+    expect(text).not.toContain('…');
+  });
+  it.each([
+    [
+      'nvd_invalid_response',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Retry later; report a persistent invalid NVD response.',
+    ],
+    [
+      'nvd_request_blocked',
+      JsonRpcErrorCode.Forbidden,
+      'Rephrase query text; otherwise try later or use another network.',
+    ],
+  ] as const)('renders the %s recovery on both error surfaces', async (reason, code, hint) => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+      fetchById: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
+    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+    const result = await runToolContract(nvdGetCve, { cveIds: record.cveId });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code, data: { reason, recovery: { hint } } },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
+      ]),
+    );
+    expect(nvdGetCve.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+      thrownBy: 'service',
+      retryable: false,
+    });
+  });
+});
 
 describe('nvdGetCve', () => {
   const mockService = { fetchById: vi.fn() };
@@ -404,8 +541,8 @@ describe('nvdGetCve', () => {
  * Issue #30: full-mode format() dropped data structuredContent carried — configurations rendered
  * as a bare group count, references were cut at five, and allLanguages never reached content[].
  */
-describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
-  /** `count` CPE matches in one node, so the cap boundary can be driven exactly. */
+describe('nvdGetCve — full-mode format() parity (issue #52)', () => {
+  /** `count` CPE matches in one node, including the former cap boundary. */
   function cveWithMatches(count: number): GetCveRow {
     return {
       ...FULL_CVE,
@@ -439,41 +576,39 @@ describe('nvdGetCve — full-mode format() parity (issue #30)', () => {
   it('renders actual CPE match criteria and version bounds, not just a group count', () => {
     const text = render([cveWithMatches(1)]);
 
-    expect(text).toContain('cpe:2.3:o:fedoraproject:fedora:30:*:*:*:*:*:*:*');
+    expect(text).toContain(escapeMarkdownInline('cpe:2.3:o:fedoraproject:fedora:30:*:*:*:*:*:*:*'));
     expect(text).toContain('< 2.15.0');
     expect(text).toContain('1 configuration group(s), 1 node(s), 1 CPE match(es)');
     // The old formatter stopped at the group count and printed no criteria at all.
     expect(text).not.toMatch(/\*\*Configurations:\*\* 1 configuration group\(s\)\s*$/m);
   });
 
-  it('omits the CPE-match trailer when the count is exactly the cap', () => {
-    const text = render([cveWithMatches(CPE_MATCH_CAP)]);
+  it('renders every criterion at the former cap boundary', () => {
+    const text = render([cveWithMatches(5)]);
 
-    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(CPE_MATCH_CAP);
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(5);
     expect(text).not.toContain('more —');
   });
 
-  it('adds the CPE-match trailer at one past the cap and points at the retrieval path', () => {
-    const text = render([cveWithMatches(CPE_MATCH_CAP + 1)]);
+  it('renders all criteria at one past the former cap', () => {
+    const text = render([cveWithMatches(6)]);
 
-    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(CPE_MATCH_CAP);
-    expect(text).toContain('… 1 more');
-    // A capped remainder with no way to reach it is a dead end — name the tool that gets there.
-    expect(text).toContain('nvd_audit_cpe');
+    expect(text.match(/cpe:2\.3:o:fedoraproject/g)).toHaveLength(6);
+    expect(text).not.toContain('…');
   });
 
-  it('omits the references trailer when the count is exactly the cap', () => {
-    const text = render([cveWithReferences(REFERENCE_CAP)]);
+  it('renders every reference at the former cap boundary', () => {
+    const text = render([cveWithReferences(15)]);
 
-    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(REFERENCE_CAP);
+    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(30);
     expect(text).not.toContain('more references');
   });
 
-  it('adds the references trailer at one past the cap', () => {
-    const text = render([cveWithReferences(REFERENCE_CAP + 1)]);
+  it('renders all references at one past the former cap', () => {
+    const text = render([cveWithReferences(16)]);
 
-    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(REFERENCE_CAP);
-    expect(text).toContain('… 1 more references');
+    expect(text.match(/example\.invalid\/advisory/g)).toHaveLength(32);
+    expect(text).not.toContain('…');
   });
 
   it('renders every language a record carries so allLanguages reaches content[]', () => {
@@ -809,7 +944,7 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
       expect(text).toContain('2023-11-06T03:18:00.000');
       expect(text).toContain('[en] Apache Log4j2 JNDI vulnerability.');
       expect(text).toContain('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H');
-      expect(text).toContain('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*');
+      expect(text).toContain(escapeMarkdownInline('cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*'));
       expect(text).toContain('**CISA KEV Details:**');
     }
   });
@@ -846,7 +981,7 @@ describe('nvdGetCve — total format() across both modes (issue #38)', () => {
     } as unknown as GetCveRow;
 
     expect(render([withSource])).toContain(
-      'https://example.invalid/a [cve@mitre.org] (Vendor Advisory)',
+      '[https://example.invalid/a](<https://example.invalid/a>) [cve@mitre.org] (Vendor Advisory)',
     );
   });
 
@@ -960,10 +1095,12 @@ describe('nvdGetCve — upstream nesting reaches both surfaces intact', () => {
     const text = (at(result.content as Array<{ text?: string }>) as { text: string }).text;
     expect(text).toContain('2 configuration group(s), 3 node(s), 4 CPE match(es)');
     expect(text).toContain(
-      'cpe:2.3:o:netapp:a700s_firmware:9.0:*:*:*:*:*:*:* [group 0; AND with sibling nodes; OR within node; vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:o:netapp:a700s_firmware:9.0:*:*:*:*:*:*:*') +
+        ' [group 0; AND with sibling nodes; OR within node; vulnerable component]',
     );
     expect(text).toContain(
-      'cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:* (< 1.1.1o) [group 1; vulnerable component]',
+      escapeMarkdownInline('cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:* (< 1.1.1o)') +
+        ' [group 1; vulnerable component]',
     );
   });
 });

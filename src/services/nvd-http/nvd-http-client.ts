@@ -8,8 +8,10 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   configurationError,
+  forbidden,
   McpError,
   rateLimited,
+  requestCancelled,
   serviceUnavailable,
   timeout,
   validationError,
@@ -118,15 +120,15 @@ export class NvdHttpClient {
    * Retry wraps the pacing queue rather than sitting inside it, so every attempt — the first
    * try and each retry — waits its turn and counts against the rate budget.
    */
-  get<T>(
+  async get(
     endpoint: string,
     params: Record<string, string | number | boolean | undefined>,
     ctx: Context,
     budget?: NvdRequestBudget,
-  ): Promise<T> {
+  ): Promise<unknown> {
     let attemptIndex = 0;
     const timeoutMs = budget?.timeoutMs ?? this.timeoutMs;
-    return withRetry(
+    const text = await withRetry(
       () => {
         /**
          * NVD's Retry-After is a full 30s window and the MCP client request deadline is 60s, so
@@ -135,7 +137,7 @@ export class NvdHttpClient {
          */
         const mayWaitOutRateLimit = attemptIndex++ === 0 && !!this.apiKey;
         return this.schedule(() =>
-          this.fetchOnce<T>(endpoint, params, ctx, mayWaitOutRateLimit, timeoutMs),
+          this.fetchOnce(endpoint, params, ctx, mayWaitOutRateLimit, timeoutMs),
         );
       },
       {
@@ -146,6 +148,16 @@ export class NvdHttpClient {
         signal: ctx.signal,
       },
     );
+    try {
+      const value: unknown = JSON.parse(text);
+      return value;
+    } catch (err) {
+      throw serviceUnavailable(
+        'NVD API returned an invalid response.',
+        { endpoint, reason: 'nvd_invalid_response', retryable: false },
+        { cause: err },
+      );
+    }
   }
 
   /** Enqueue one request attempt, paced behind the inter-request gap and any active 403 backoff. */
@@ -179,15 +191,15 @@ export class NvdHttpClient {
     else task();
   }
 
-  private async fetchOnce<T>(
+  private async fetchOnce(
     endpoint: string,
     params: Record<string, string | number | boolean | undefined>,
     ctx: Context,
     mayWaitOutRateLimit: boolean,
     timeoutMs: number,
-  ): Promise<T> {
+  ): Promise<string> {
     // A queued attempt can wait out a rate-limit window; don't spend a slot once the caller is gone.
-    if (ctx.signal.aborted) throw timeout('NVD request cancelled by caller.');
+    if (ctx.signal.aborted) throw requestCancelled('NVD request cancelled by caller.');
 
     const url = this.buildUrl(endpoint, params);
     // The endpoint only: the full URL carries caller-supplied query values into the log record.
@@ -203,57 +215,57 @@ export class NvdHttpClient {
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
 
-    let response: Response;
     try {
-      response = await fetch(url.toString(), {
+      const response = await fetch(url.toString(), {
         headers: this.buildHeaders(),
         signal: controller.signal,
       });
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        if (ctx.signal.aborted) throw timeout('NVD request cancelled by caller.');
-        throw timeout(`NVD request timed out after ${timeoutMs}ms.`);
+
+      if (response.status === 403) {
+        if (!response.headers.has('Retry-After')) {
+          const text = await response.text();
+          const mediaType = response.headers
+            .get('Content-Type')
+            ?.split(';', 1)[0]
+            ?.trim()
+            .toLowerCase();
+          if (mediaType === 'text/html' && text.includes('Sorry, you have been blocked')) {
+            throw forbidden('NVD security layer blocked the request.', {
+              endpoint,
+              reason: 'nvd_request_blocked',
+              retryable: false,
+            });
+          }
+        }
+        throw this.rateLimitError(response, mayWaitOutRateLimit);
       }
+
+      if (response.status === 404) {
+        throw this.rejectionFor(endpoint, response.headers.get(NVD_MESSAGE_HEADER));
+      }
+
+      if (!response.ok) {
+        throw serviceUnavailable(`NVD API returned HTTP ${response.status}.`, {
+          endpoint,
+          status: response.status,
+        });
+      }
+
+      return await response.text();
+    } catch (err) {
+      if (ctx.signal.aborted)
+        throw requestCancelled('NVD request cancelled by caller.', undefined, { cause: err });
+      if (controller.signal.aborted)
+        throw timeout(`NVD request timed out after ${timeoutMs}ms.`, undefined, { cause: err });
+      if (err instanceof McpError) throw err;
       throw serviceUnavailable(
-        `NVD API network error: ${(err as Error).message}`,
+        'NVD API network request or response body failed.',
         { endpoint },
-        { cause: err as Error },
+        { cause: err },
       );
     } finally {
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
-    }
-
-    if (response.status === 403) {
-      throw this.rateLimitError(response, mayWaitOutRateLimit);
-    }
-
-    if (response.status === 404) {
-      throw this.rejectionFor(endpoint, response.headers.get(NVD_MESSAGE_HEADER));
-    }
-
-    if (!response.ok) {
-      throw serviceUnavailable(`NVD API returned HTTP ${response.status}.`, {
-        endpoint,
-        status: response.status,
-      });
-    }
-
-    const text = await response.text();
-    if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-      throw serviceUnavailable(
-        'NVD API returned HTML instead of JSON — likely rate-limited or a temporary outage.',
-      );
-    }
-
-    try {
-      return JSON.parse(text) as T;
-    } catch (err) {
-      throw serviceUnavailable(
-        'NVD API returned malformed JSON.',
-        { endpoint },
-        { cause: err as Error },
-      );
     }
   }
 

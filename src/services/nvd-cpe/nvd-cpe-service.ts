@@ -9,21 +9,21 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { getNvdHttpClient, isNvdRequestRejected } from '../nvd-http/nvd-http-client.js';
+import { parseNvdResponse } from '../nvd-http/parse-nvd-response.js';
 import type { CpeRecord, RawCpeItem, RawCpeResponse } from './types.js';
+import { rawCpeResponseSchema } from './types.js';
 
 /** Normalize a raw CPE item to a CpeRecord. */
 function normalizeCpe(raw: RawCpeItem): CpeRecord {
-  const titles = (raw.titles ?? [])
-    .filter((t) => t.lang === 'en' && t.title)
-    .map((t) => t.title as string);
+  const title = raw.titles?.find((entry) => entry.lang === 'en' && entry.title)?.title;
 
-  const deprecatedBy = (raw.deprecatedBy ?? [])
-    .filter((d) => d.cpeName)
-    .map((d) => d.cpeName as string);
+  const deprecatedBy = (raw.deprecatedBy ?? []).flatMap((entry) =>
+    entry.cpeName ? [entry.cpeName] : [],
+  );
 
   return {
     cpeName: raw.cpeName ?? '',
-    ...(titles.length > 0 && { title: titles[0] }),
+    ...(title && { title }),
     deprecated: raw.deprecated ?? false,
     ...(deprecatedBy.length > 0 && { deprecatedBy }),
     ...(raw.lastModified && { lastModified: raw.lastModified }),
@@ -60,7 +60,11 @@ export class NvdCpeService {
 
     let response: RawCpeResponse;
     try {
-      response = await client.get<RawCpeResponse>('cpes/2.0', apiParams, ctx);
+      response = parseNvdResponse(
+        rawCpeResponseSchema,
+        await client.get('cpes/2.0', apiParams, ctx),
+        'cpes/2.0',
+      );
     } catch (err) {
       /**
        * The tool's prefix check clears any string starting `cpe:2.3:`, but NVD rejects a pattern
@@ -78,10 +82,10 @@ export class NvdCpeService {
       throw err;
     }
 
-    const items = (response.products ?? []).map((p) => p.cpe).filter((c): c is RawCpeItem => !!c);
+    const items = response.products.map((p) => p.cpe).filter((c): c is RawCpeItem => !!c);
 
     const cpes = items.map(normalizeCpe);
-    const totalResults = response.totalResults ?? 0;
+    const totalResults = response.totalResults;
 
     ctx.log.info('CPE search completed', { totalResults, returned: cpes.length });
 

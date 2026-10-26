@@ -5,6 +5,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  applyReadLimit,
+  readLimitEnrichment,
+  readLimitSchema,
+} from '@/mcp-server/tools/read-limit.js';
 import { BriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
@@ -25,11 +31,7 @@ function nowIso(): string {
 export const nvdSearchCves = tool('nvd_search_cves', {
   title: 'Search CVEs',
   description:
-    'Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. ' +
-    'The primary discovery tool for vulnerability surveillance and triage workflows. ' +
-    'pubDays and lastModDays are convenience shorthands that expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in the response enrichment. ' +
-    'Returns brief summaries — call nvd_get_cve for full detail on specific IDs. ' +
-    'At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID).',
+    'Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. The primary discovery tool for vulnerability surveillance and triage workflows. pubDays and lastModDays expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in the response enrichment. Returns brief summaries — call nvd_get_cve for full detail on specific IDs. At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID). Blank string filters are omitted with a notice; nonblank strings are trimmed.',
   annotations: { readOnlyHint: true, openWorldHint: false },
 
   input: z.object({
@@ -111,13 +113,9 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       .boolean()
       .default(true)
       .describe('When true (default), excludes CVEs with REJECT/Rejected status.'),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(2000)
-      .default(20)
-      .describe('Maximum number of results to return (default 20, max 2000).'),
+    limit: readLimitSchema(2000, 20).describe(
+      'Maximum number of results to return (default 20; values above 2000 are clamped unless NVD_CLAMP_LIMITS is false).',
+    ),
     offset: z.number().int().min(0).default(0).describe('Zero-based page offset for pagination.'),
   }),
 
@@ -128,6 +126,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   }),
 
   enrichment: {
+    ...readLimitEnrichment,
     totalCount: z.number().describe('Total matching CVEs in NVD before pagination.'),
     returned: z.number().describe('Number of CVEs returned in this response.'),
     offset: z.number().describe('Page offset used in this query.'),
@@ -169,6 +168,19 @@ export const nvdSearchCves = tool('nvd_search_cves', {
             'The CVSS version the severity filter matched on. Present only alongside severity.',
           ),
         cweId: z.string().optional().describe('The CWE weakness filter that was applied.'),
+        pubStartDate: z
+          .string()
+          .optional()
+          .describe('Effective publication range start sent to NVD.'),
+        pubEndDate: z.string().optional().describe('Effective publication range end sent to NVD.'),
+        lastModStartDate: z
+          .string()
+          .optional()
+          .describe('Effective last-modified range start sent to NVD.'),
+        lastModEndDate: z
+          .string()
+          .optional()
+          .describe('Effective last-modified range end sent to NVD.'),
         kevOnly: z
           .boolean()
           .optional()
@@ -186,11 +198,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       .string()
       .optional()
       .describe(
-        'Guidance when no CVEs were returned — distinguishes a query nothing matched from an offset past the result set from an empty page NVD returned inside a range it says has matches — or, on a partial page, the offset that reaches the next one.',
+        'Ignored blank filters and paging guidance: distinguishes no matches, an exhausted offset, and an inconsistent empty upstream page; on a partial page, names the next offset.',
       ),
   },
 
   enrichmentTrailer: {
+    notice: { render: (notice) => (notice ? `> ${escapeMarkdownInline(notice)}` : '') },
     returned: { label: 'Returned' },
     offset: { label: 'Offset' },
     datesClamped: {
@@ -206,13 +219,38 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       render: (filters) =>
         filters
           ? `**Filters applied:** ${Object.entries(filters)
-              .map(([key, value]) => `${key}=${value}`)
+              .map(([key, value]) => `${key}=${escapeMarkdownInline(String(value))}`)
               .join(', ')}`
           : '',
     },
   },
 
   errors: [
+    {
+      reason: 'nvd_invalid_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD returned an unusable response.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Try again later; if the failure persists, report the failing tool call.',
+    },
+    {
+      reason: 'nvd_request_blocked',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The NVD security layer blocked the request.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Rephrase query text, or try again later or from another network.',
+    },
+    {
+      reason: 'nvd_request_rejected',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'NVD rejected a search parameter.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery:
+        'Use case-sensitive CWE-<number>, NVD-CWE-Other, or NVD-CWE-noinfo for cweId, and ISO 8601 datetimes with a time component such as 2024-01-01T00:00:00.000Z for date fields. Check the rejected parameter named in the message.',
+    },
     {
       reason: 'exact_phrase_without_keyword',
       code: JsonRpcErrorCode.ValidationError,
@@ -261,7 +299,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
-      when: 'NVD returned HTTP 403 indicating the rate limit was exceeded.',
+      when: 'NVD explicitly reported that the rate limit was exceeded.',
       retryable: true,
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
@@ -271,6 +309,28 @@ export const nvdSearchCves = tool('nvd_search_cves', {
   ],
 
   async handler(input, ctx) {
+    input = { ...input };
+    const ignoredFilters: string[] = [];
+    for (const field of [
+      'keyword',
+      'cweId',
+      'pubStartDate',
+      'pubEndDate',
+      'lastModStartDate',
+      'lastModEndDate',
+    ] as const) {
+      const value = input[field];
+      if (value === undefined) continue;
+      const trimmed = value.trim();
+      if (trimmed) input[field] = trimmed;
+      else {
+        delete input[field];
+        ignoredFilters.push(field);
+      }
+    }
+    const notices: string[] = [];
+    if (ignoredFilters.length > 0) notices.push(`Ignored empty ${ignoredFilters.join(', ')}.`);
+
     ctx.log.info('Searching CVEs', {
       keyword: input.keyword,
       severity: input.severity,
@@ -427,6 +487,8 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     }
 
     const service = getNvdCveService();
+    const clamped = applyReadLimit(input.limit, 2000, 'nvd_search_cves', ctx);
+    if (clamped.notice) notices.push(clamped.notice);
     const result = await service.searchCves(
       {
         ...(input.keyword && { keyword: input.keyword }),
@@ -440,7 +502,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         ...(lastModEndDate && { lastModEndDate }),
         kevOnly: input.kevOnly,
         noRejected: input.noRejected,
-        limit: input.limit,
+        limit: clamped.limit,
         offset: input.offset,
       },
       ctx,
@@ -455,6 +517,10 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       ...(input.exactPhrase && { exactPhrase: true }),
       ...(input.severity && { severity: input.severity, severityVersion: input.severityVersion }),
       ...(input.cweId && { cweId: input.cweId }),
+      ...(pubStartDate && { pubStartDate }),
+      ...(pubEndDate && { pubEndDate }),
+      ...(lastModStartDate && { lastModStartDate }),
+      ...(lastModEndDate && { lastModEndDate }),
       ...(input.kevOnly && { kevOnly: true }),
       ...(input.noRejected === false && { noRejected: false }),
     };
@@ -474,15 +540,15 @@ export const nvdSearchCves = tool('nvd_search_cves', {
        * did not make.
        */
       if (result.totalResults > 0 && input.offset >= result.totalResults) {
-        ctx.enrich.notice(
+        notices.push(
           `Offset ${input.offset} is past the end of the result set (${result.totalResults} total). Use a lower offset to page through results.`,
         );
       } else if (result.totalResults > 0) {
-        ctx.enrich.notice(
+        notices.push(
           `NVD reported ${result.totalResults} match(es) but returned no CVEs at offset ${input.offset}, which is inside that range. Retry the query; the offset is not the problem.`,
         );
       } else {
-        ctx.enrich.notice(
+        notices.push(
           'No CVEs matched the search criteria. Try broadening the keyword or date range.',
         );
       }
@@ -492,11 +558,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
        * did not carry — the next page's own offset, not one past it. Naming anything higher skips
        * a record.
        */
-      ctx.enrich.notice(
+      notices.push(
         `Results truncated — ${result.totalResults} CVEs match; set offset to ${result.offset + result.returned} for the next page.`,
       );
     }
 
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     return { cves: result.cves };
   },
 
@@ -508,12 +575,14 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     }
 
     for (const cve of result.cves) {
-      lines.push(`### ${cve.cveId}`);
-      lines.push(`**Status:** ${cve.vulnStatus} | **Published:** ${cve.published}`);
+      lines.push(`### ${escapeMarkdownInline(cve.cveId)}`);
+      lines.push(
+        `**Status:** ${escapeMarkdownInline(cve.vulnStatus)} | **Published:** ${escapeMarkdownInline(cve.published)}`,
+      );
 
       if (cve.severity) {
         lines.push(
-          `**Severity:** ${cve.severity.label} (${cve.severity.score}) from CVSS ${cve.severity.fromVersion}`,
+          `**Severity:** ${escapeMarkdownInline(cve.severity.label)} (${cve.severity.score}) from CVSS ${escapeMarkdownInline(cve.severity.fromVersion)}`,
         );
       } else {
         lines.push('**Severity:** Not available');
@@ -521,16 +590,16 @@ export const nvdSearchCves = tool('nvd_search_cves', {
 
       if (cve.filteredSeverity) {
         lines.push(
-          `**Severity at the filtered CVSS version:** ${cve.filteredSeverity.label} (${cve.filteredSeverity.score}) from CVSS ${cve.filteredSeverity.fromVersion} — this is the score the severity filter matched on.`,
+          `**Severity at the filtered CVSS version:** ${escapeMarkdownInline(cve.filteredSeverity.label)} (${cve.filteredSeverity.score}) from CVSS ${escapeMarkdownInline(cve.filteredSeverity.fromVersion)} — this is the score the severity filter matched on.`,
         );
       }
 
       if (cve.cisaVulnerabilityName) {
-        lines.push(`**CISA KEV:** ${cve.cisaVulnerabilityName}`);
+        lines.push(`**CISA KEV:** ${escapeMarkdownInline(cve.cisaVulnerabilityName)}`);
       }
 
       if (cve.description) {
-        lines.push(cve.description);
+        lines.push(escapeMarkdownInline(cve.description));
       }
 
       lines.push('');

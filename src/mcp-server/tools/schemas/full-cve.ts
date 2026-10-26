@@ -59,6 +59,36 @@ export const CveRecordSchema = z.object({
   severity: TopSeveritySchema.optional().describe(
     'Top severity. Absent if no CVSS scores present.',
   ),
+  ssvc: z
+    .array(
+      z
+        .object({
+          source: z.string().describe('Contributor name or original source identifier.'),
+          role: z.string().describe('Assessment role.'),
+          version: z.string().describe('SSVC decision-tree version.'),
+          timestamp: z.string().optional().describe('Assessment timestamp when provided.'),
+          decisionPoints: z
+            .array(
+              z
+                .record(
+                  z.string().describe('Decision-point name.'),
+                  z
+                    .union([
+                      z.string().describe('Decision-point value.'),
+                      z
+                        .array(z.string().describe('One decision-point value.'))
+                        .describe('Decision-point values.'),
+                    ])
+                    .describe('One string or ordered list of strings.'),
+                )
+                .describe('Decision-point names and values.'),
+            )
+            .describe('Ordered option objects; repeated keys remain separate.'),
+        })
+        .describe('One current SSVC assessment.'),
+    )
+    .optional()
+    .describe('Current SSVC assessments in upstream order.'),
   weaknesses: z
     .array(
       z

@@ -22,7 +22,8 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "NVD_API_KEY": "${user_config.NVD_API_KEY}"
+        "NVD_API_KEY": "${user_config.NVD_API_KEY}",
+        "NVD_CLAMP_LIMITS": "${user_config.NVD_CLAMP_LIMITS}"
       }
     }
   },
@@ -34,6 +35,13 @@
   "tools_generated": true,
   "prompts_generated": true,
   "user_config": {
+    "NVD_CLAMP_LIMITS": {
+      "title": "Clamp read limits",
+      "type": "boolean",
+      "description": "Clamp oversized requests to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False rejects oversized input.",
+      "required": false,
+      "default": true
+    },
     "NVD_API_KEY": {
       "title": "NVD API Key",
       "type": "string",

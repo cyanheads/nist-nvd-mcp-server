@@ -31,14 +31,9 @@ await createApp({
   tools: [nvdGetCve, nvdSearchCves, nvdAuditCpe, nvdSearchCpes, nvdGetCveHistory],
   resources: [nvdCveResource],
   prompts: [],
+  skills: 'skills',
   instructions:
-    'This server provides read-only access to the NIST National Vulnerability Database (NVD).\n' +
-    '- Use nvd_search_cves to discover CVEs by keyword, severity, CWE, date range, or CISA KEV status.\n' +
-    '- Use nvd_get_cve for full CVSS details on specific CVE IDs (up to 100 per call).\n' +
-    '- Use nvd_search_cpes to find the correct CPE name for a product before auditing.\n' +
-    '- Use nvd_audit_cpe to find all CVEs affecting a specific product version.\n' +
-    '- Use nvd_get_cve_history to track when a CVE was re-scored or escalated.\n' +
-    '- Rate limit: 5 req/30s without API key, 50 req/30s with NVD_API_KEY.',
+    'Read-only access to the NIST National Vulnerability Database (NVD). Resolve an unknown product CPE with nvd_search_cpes before passing its exact CPEv2.3 name to nvd_audit_cpe; audit results cover NVD records for that target, subject to pagination and analysis completeness. Reuse CVE IDs from search or audit results with nvd_get_cve for current details and nvd_get_cve_history for revisions. Access works without a key at 5 requests per 30 seconds; NVD_API_KEY raises this to 50. Requests share a paced queue.',
 
   setup(core) {
     const cfg = getServerConfig();

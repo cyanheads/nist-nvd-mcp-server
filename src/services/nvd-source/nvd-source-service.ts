@@ -8,9 +8,11 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { getNvdHttpClient, type NvdRequestBudget } from '../nvd-http/nvd-http-client.js';
-import type { RawNvdSourceResponse } from './types.js';
+import { parseNvdResponse } from '../nvd-http/parse-nvd-response.js';
+import { rawNvdSourceResponseSchema } from './types.js';
 
 /**
  * Maps an NVD source identifier to its published contributor name, returning the identifier
@@ -69,31 +71,37 @@ export class NvdSourceService {
    * request: a burst of tool calls must not stampede the endpoint.
    */
   async getResolver(ctx: Context): Promise<SourceNameResolver> {
+    if (ctx.signal.aborted) throw requestCancelled('NVD source lookup cancelled by caller.');
     if (Date.now() >= this.expiresAt) {
       this.inFlight ??= this.load(ctx).finally(() => {
         this.inFlight = undefined;
       });
       this.names = await this.inFlight;
     }
+    if (ctx.signal.aborted) throw requestCancelled('NVD source lookup cancelled by caller.');
     const names = this.names;
     return (identifier) => names.get(identifier) ?? identifier;
   }
 
   /**
    * Load the dictionary, degrading to whatever is already cached when NVD cannot serve it. A CVE
-   * lookup must not start failing because a secondary metadata endpoint is down, so this never
-   * throws — an unresolvable identifier reaching the caller raw is the documented fallback.
+   * lookup must not start failing because a secondary metadata endpoint is down. Caller
+   * cancellation still propagates and leaves the cache cold.
    */
   private async load(ctx: Context): Promise<Map<string, string>> {
     try {
-      const response = await getNvdHttpClient().get<RawNvdSourceResponse>(
+      const response = parseNvdResponse(
+        rawNvdSourceResponseSchema,
+        await getNvdHttpClient().get(
+          'source/2.0',
+          { resultsPerPage: SOURCE_PAGE_SIZE },
+          ctx,
+          SOURCE_REQUEST_BUDGET,
+        ),
         'source/2.0',
-        { resultsPerPage: SOURCE_PAGE_SIZE },
-        ctx,
-        SOURCE_REQUEST_BUDGET,
       );
 
-      const sources = response.sources ?? [];
+      const sources = response.sources;
       const names = new Map<string, string>();
       for (const source of sources) {
         if (!source.name) continue;
@@ -108,7 +116,7 @@ export class NvdSourceService {
         }
       }
 
-      const totalResults = response.totalResults ?? sources.length;
+      const totalResults = response.totalResults;
       if (totalResults > sources.length) {
         ctx.log.warning(
           'NVD source dictionary page is incomplete — the rest resolve as raw values',
@@ -132,9 +140,13 @@ export class NvdSourceService {
        * again, rather than committing every caller to raw identifiers for the whole failure
        * window on the strength of an unrelated cancellation.
        */
-      if (ctx.signal.aborted) {
+      if (
+        ctx.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError') ||
+        (err instanceof McpError && err.code === JsonRpcErrorCode.RequestCancelled)
+      ) {
         ctx.log.debug('NVD source dictionary load cancelled with its caller — cache left cold');
-        return this.names;
+        throw err;
       }
       ctx.log.warning('NVD source dictionary unavailable — source identifiers pass through raw', {
         error: (err as Error).message,
