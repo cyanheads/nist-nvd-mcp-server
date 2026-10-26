@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/nist-nvd-mcp-server",
     "source": "github"
   },
-  "version": "0.3.2",
+  "version": "0.4.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/nist-nvd-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "environmentVariables": [
         {
           "name": "NVD_CLAMP_LIMITS",
@@ -58,7 +58,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/nist-nvd-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "environmentVariables": [
         {
           "name": "NVD_CLAMP_LIMITS",
