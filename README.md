@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/nist-nvd-mcp-server</h1>
   <p><b>Search and audit CVEs by keyword, severity, CWE, CISA KEV status, and CPE via the NIST National Vulnerability Database. STDIO or Streamable HTTP.</b>
-  <div>5 Tools • 1 Resource</div>
+  <div>5 Tools • 2 Resources</div>
   </p>
 </div>
 
@@ -46,8 +46,9 @@ CVE and CPE data from the NIST National Vulnerability Database. Search and audit
 | Resource | Description |
 |:---------|:------------|
 | `nvd://cve/{cveId}` | Full CVE record by ID — same data as `nvd_get_cve` for a single ID, as a stable URI for injectable context. |
+| `skill://nist-nvd-guide/SKILL.md` | Product applicability, identifier chains, severity interpretation, and coverage guidance. |
 
-All resource data is also reachable via tools.
+CVE resource data is also reachable via `nvd_get_cve`. The published guide is also available to plugin installs under [`skills/nist-nvd-guide/SKILL.md`](./skills/nist-nvd-guide/SKILL.md).
 
 ## Capability reference
 
