@@ -12,9 +12,7 @@ const CVE_ID_REGEX = /^CVE-\d{4}-\d{4,}$/i;
 export const nvdCveResource = resource('nvd://cve/{cveId}', {
   name: 'NVD CVE Record',
   description:
-    'Fetch a single CVE record by ID from the NIST NVD via a stable URI. ' +
-    'Returns the same full data as nvd_get_cve for a single ID: CVSS scores, CWE weaknesses, ' +
-    'CPE configurations, CISA KEV fields, current SSVC assessments, and references.',
+    "Fetch a single CVE record by ID from the NIST NVD via a stable URI. Returns the same full data as nvd_get_cve for a single ID: CVSS scores with who supplied each, CWE weaknesses, CPE configurations from NVD analysis, the affected products the CNA and any ADP state themselves, the record's source and tags, CISA KEV fields, current SSVC assessments, and references.",
   mimeType: 'application/json',
 
   params: z.object({
@@ -47,7 +45,33 @@ export const nvdCveResource = resource('nvd://cve/{cveId}', {
       retryable: true,
       thrownBy: 'service',
       recovery:
-        'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
+        'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    },
+    {
+      reason: 'nvd_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD answered with HTTP 5xx, or the request or its response failed on the network, after the client retried.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery: 'NVD is failing or unreachable; wait a minute and retry the call.',
+    },
+    {
+      reason: 'nvd_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'An NVD request outlived its timeout, or the call ran out of its 55-second deadline.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery:
+        'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    },
+    {
+      reason: 'nvd_invalid_api_key',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: "NVD refused the server's configured NVD_API_KEY.",
+      retryable: false,
+      thrownBy: 'service',
+      recovery:
+        "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
     },
     {
       reason: 'invalid_cve_id_format',

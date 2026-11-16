@@ -6,14 +6,17 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
+import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import * as nvdSourceServiceModule from '@/services/nvd-source/nvd-source-service.js';
 import { at } from '../support/at.js';
+import { CVE_2021_3007, CVE_2024_23225, nvdFake } from '../support/nvd-affected-fixtures.js';
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -55,6 +58,7 @@ const FULL_CVE: CveRecord = {
     requiredAction: 'Apply updates per vendor instructions.',
     vulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
   },
+  affectedProducts: [],
 };
 
 /**
@@ -86,6 +90,7 @@ const AND_GROUP_CVE: CveRecord = {
       cpeMatch: [{ vulnerable: false, criteria: 'cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*' }],
     },
   ],
+  affectedProducts: [],
 };
 
 /** Eight CPE matches split across two groups, beyond the former render cap. */
@@ -115,6 +120,7 @@ const MANY_MATCH_CVE: CveRecord = {
       })),
     },
   ],
+  affectedProducts: [],
 };
 
 const SPARSE_CVE: CveRecord = {
@@ -126,6 +132,7 @@ const SPARSE_CVE: CveRecord = {
   cvssScores: [],
   weaknesses: [],
   configurationNodes: [],
+  affectedProducts: [],
 };
 
 function makeAuditResult(
@@ -267,34 +274,63 @@ describe('nvdAuditCpe — full rendering parity', () => {
     [
       'nvd_invalid_response',
       JsonRpcErrorCode.ServiceUnavailable,
+      false,
       'Retry later; report a persistent invalid NVD response.',
     ],
     [
       'nvd_request_blocked',
       JsonRpcErrorCode.Forbidden,
+      false,
       'Rephrase query text; otherwise try later or use another network.',
     ],
-  ] as const)('renders the %s recovery on both error surfaces', async (reason, code, hint) => {
-    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
-      auditCpe: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
-    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
-    const result = await runToolContract(nvdAuditCpe, {
-      cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
-    });
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      error: { code, data: { reason, recovery: { hint } } },
-    });
-    expect(result.content).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
-      ]),
-    );
-    expect(nvdAuditCpe.errors?.find((entry) => entry.reason === reason)).toMatchObject({
-      thrownBy: 'service',
-      retryable: false,
-    });
-  });
+    [
+      'rate_limited',
+      JsonRpcErrorCode.RateLimited,
+      true,
+      'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    ],
+    [
+      'nvd_unavailable',
+      JsonRpcErrorCode.ServiceUnavailable,
+      true,
+      'NVD is failing or unreachable; wait a minute and retry the call.',
+    ],
+    [
+      'nvd_timeout',
+      JsonRpcErrorCode.Timeout,
+      true,
+      'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    ],
+    [
+      'nvd_invalid_api_key',
+      JsonRpcErrorCode.ConfigurationError,
+      false,
+      "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
+    ],
+  ] as const)(
+    'renders the %s recovery on both error surfaces',
+    async (reason, code, retryable, hint) => {
+      vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+        auditCpe: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
+      } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+      const result = await runToolContract(nvdAuditCpe, {
+        cpeName: 'cpe:2.3:a:vendor:product:1:*:*:*:*:*:*:*',
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code, data: { reason, recovery: { hint } } },
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
+        ]),
+      );
+      expect(nvdAuditCpe.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+        thrownBy: 'service',
+        retryable,
+      });
+    },
+  );
 });
 
 describe('nvdAuditCpe', () => {
@@ -937,8 +973,9 @@ describe('nvdAuditCpe — next-page notice (issue #36)', () => {
 
 /**
  * The partial-page arm sits on the outer `else` of the empty-page check, so it is structurally
- * exclusive with the four empty-page branches. Assert that rather than trust it: every case must
- * raise a notice, and exactly one of the five shapes.
+ * exclusive with the empty-page branches. Assert that rather than trust it: every case must raise
+ * a notice, and exactly one of the shapes. A page severityMin emptied splits by whether CVEs remain
+ * past it (#69), and a zero total under a server-side filter is its own shape (#68).
  */
 describe('nvdAuditCpe — exactly one notice per response', () => {
   const mockService = { auditCpe: vi.fn() };
@@ -952,9 +989,11 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
 
   const SHAPES = {
     pastEnd: 'past the end',
-    severityDrop: 'scored below',
+    severityDropMidRange: 'To continue at this threshold',
+    severityDropExhausted: 'exhausted at this threshold',
     contradictedCount: 'Retry the query',
     genuineZero: 'a clean audit, not a failed one',
+    filteredZero: 'match the applied filters',
     partialPage: 'Results truncated',
   } as const;
 
@@ -962,11 +1001,17 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
     name: keyof typeof SHAPES;
     result: Record<string, unknown>;
     severityMin?: 'CRITICAL';
+    kevOnly?: true;
   }> = [
     { name: 'pastEnd', result: { returned: 0, offset: 500, totalResults: 10, filteredCount: 0 } },
     {
-      name: 'severityDrop',
+      name: 'severityDropMidRange',
       result: { returned: 0, offset: 0, totalResults: 10, filteredCount: 3 },
+      severityMin: 'CRITICAL',
+    },
+    {
+      name: 'severityDropExhausted',
+      result: { returned: 0, offset: 7, totalResults: 10, filteredCount: 3 },
       severityMin: 'CRITICAL',
     },
     {
@@ -974,10 +1019,15 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
       result: { returned: 0, offset: 2, totalResults: 10, filteredCount: 0 },
     },
     { name: 'genuineZero', result: { returned: 0, offset: 0, totalResults: 0, filteredCount: 0 } },
+    {
+      name: 'filteredZero',
+      result: { returned: 0, offset: 0, totalResults: 0, filteredCount: 0 },
+      kevOnly: true,
+    },
     { name: 'partialPage', result: { returned: 3, offset: 0, totalResults: 10, filteredCount: 0 } },
   ];
 
-  it.each(CASES)('raises only the $name notice', async ({ name, result, severityMin }) => {
+  it.each(CASES)('raises only the $name notice', async ({ name, result, severityMin, kevOnly }) => {
     const returned = result.returned as number;
     mockService.auditCpe.mockResolvedValue({
       ...result,
@@ -990,6 +1040,7 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
         virtualMatchString: 'cpe:2.3:a:apache:log4j:*',
         offset: result.offset as number,
         ...(severityMin && { severityMin }),
+        ...(kevOnly && { kevOnly }),
       }),
       ctx,
     );
@@ -1002,6 +1053,414 @@ describe('nvdAuditCpe — exactly one notice per response', () => {
     for (const [shapeName, marker] of Object.entries(SHAPES)) {
       if (shapeName !== name) expect(notice).not.toContain(marker);
     }
+  });
+});
+
+/**
+ * Issue #69: a page severityMin emptied named no way forward, though NVD spent index positions on
+ * every row it dropped. While rows remain past that span the notice names `offset + filteredCount`,
+ * as a partly filtered page does; once the span reaches totalCount the target is exhausted at this
+ * threshold, and raising limit would fetch nothing new.
+ */
+describe('nvdAuditCpe — page emptied by severityMin (issue #69)', () => {
+  const cpeName = 'cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*';
+  const mockService = { auditCpe: vi.fn() };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-15T20:00:00.000Z'));
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      mockService as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>,
+    );
+    mockService.auditCpe.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Both surfaces of an audit whose fetched page at `offset` lost all `dropped` rows. */
+  async function emptiedPage(offset: number, dropped: number, totalResults: number, extra = {}) {
+    mockService.auditCpe.mockResolvedValue({
+      cves: [],
+      totalResults,
+      returned: 0,
+      offset,
+      filteredCount: dropped,
+      cpeName,
+    });
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      limit: Math.max(dropped, 1),
+      offset,
+      severityMin: 'CRITICAL',
+      ...extra,
+    });
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    return { notice: (result.structuredContent as { notice?: string }).notice, text, result };
+  }
+
+  it.each([
+    [0, 1, 88, 1],
+    [40, 5, 88, 45],
+  ])(
+    'names offset + filteredCount for a page emptied at offset %i (%i dropped of %i)',
+    async (offset, dropped, total, next) => {
+      const { notice, text, result } = await emptiedPage(offset, dropped, total);
+      const expected = `All ${dropped} CVE(s) on the fetched page scored below CRITICAL. To continue at this threshold, set offset to ${next} for the next page. Lower severityMin or raise limit to widen the page NVD returns.`;
+
+      expect(notice).toBe(expected);
+      expect(text).toContain(expected);
+      expect(result.structuredContent).toMatchObject({
+        totalCount: total,
+        returned: 0,
+        offset,
+        filteredCount: dropped,
+      });
+    },
+  );
+
+  it.each([
+    [87, 1, 88],
+    [85, 5, 88],
+  ])(
+    'reports the target exhausted at this threshold once offset %i + %i dropped reaches %i',
+    async (offset, dropped, total) => {
+      const { notice, text } = await emptiedPage(offset, dropped, total);
+      const expected = `All ${dropped} CVE(s) on the fetched page scored below CRITICAL, and that page reached the end of the ${total} CVE(s) matching this audit target: the target is exhausted at this threshold. Lower severityMin to see the CVEs it dropped.`;
+
+      expect(notice).toBe(expected);
+      expect(text).toContain(expected);
+      expect(notice).not.toContain('set offset');
+      expect(notice).not.toContain('raise limit');
+    },
+  );
+
+  it('keeps the past-the-end notice at an offset equal to totalCount', async () => {
+    const { notice } = await emptiedPage(88, 0, 88);
+
+    expect(notice).toBe(
+      'Offset 88 is past the end of the result set (88 total). Use a lower offset to page through results.',
+    );
+  });
+
+  it('names the echoed dates when a shorthand set the emptied page’s window', async () => {
+    const { notice } = await emptiedPage(0, 1, 88, { lastModDays: 30 });
+
+    expect(notice).toBe(
+      'All 1 CVE(s) on the fetched page scored below CRITICAL. To continue at this threshold, set offset to 1 for the next page and send lastModStartDate and lastModEndDate from filtersApplied instead of lastModDays, so the next page reads the same window. Lower severityMin or raise limit to widen the page NVD returns.',
+    );
+  });
+});
+
+/**
+ * Issue #68: server-side kevOnly, severity-band, and date-window filters. The window grammar,
+ * pairs, ceiling, expansion, and each resolver reason are tabled at the parser's seam
+ * (`tests/tools/date-windows.test.ts`, which runs the reasons through both tools); these prove the
+ * audit's wiring from tool input through the real service to the outgoing NVD request, and its
+ * echo, notices, and contract on both surfaces.
+ */
+describe('nvdAuditCpe — server-side filters (issue #68)', () => {
+  const cpeName = 'cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*';
+  const mockClient = { get: vi.fn() };
+
+  /** An NVD row scored v3.1 HIGH that also carries a v4.0 CRITICAL band. */
+  const V3_HIGH_V4_CRITICAL = {
+    cve: {
+      id: 'CVE-2024-1000',
+      metrics: {
+        cvssMetricV31: [{ cvssData: { baseScore: 8.1, baseSeverity: 'HIGH' } }],
+        cvssMetricV40: [{ cvssData: { baseScore: 9.3, baseSeverity: 'CRITICAL' } }],
+      },
+    },
+  };
+  const V3_HIGH = {
+    cve: {
+      id: 'CVE-2024-1001',
+      metrics: { cvssMetricV31: [{ cvssData: { baseScore: 7.5, baseSeverity: 'HIGH' } }] },
+    },
+  };
+
+  const FILTERED_ZERO =
+    'No CVEs for this audit target match the applied filters (see filtersApplied) — this is not a clean audit. Widen or drop a filter; an unfiltered audit shows whether NVD holds any CVEs for the target.';
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+  const sentParams = (call = 0) => mockClient.get.mock.calls[call]?.[1] as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-15T20:00:00.000Z'));
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      mockClient as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdSourceServiceModule, 'getNvdSourceService').mockReturnValue({
+      getResolver: async () => nvdSourceServiceModule.passthroughSourceNames,
+    } as unknown as ReturnType<typeof nvdSourceServiceModule.getNvdSourceService>);
+    mockClient.get.mockReset();
+    mockClient.get.mockResolvedValue({
+      totalResults: 2,
+      vulnerabilities: [V3_HIGH_V4_CRITICAL, V3_HIGH],
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const ARMS = [
+    ['cpeName', { cpeName }, { cpeName, isVulnerable: true }],
+    [
+      'virtualMatchString',
+      {
+        virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+        versionStart: '2.4.49',
+        versionEnd: '2.4.50',
+      },
+      {
+        virtualMatchString: 'cpe:2.3:a:apache:http_server:*',
+        versionStart: '2.4.49',
+        versionStartType: 'including',
+        versionEnd: '2.4.50',
+        versionEndType: 'including',
+      },
+    ],
+  ] as const;
+
+  it.each(ARMS)(
+    'sends kevOnly, a KEV window, a shorthand window, and the band to NVD on the %s arm, echoing each on both surfaces',
+    async (_arm, target, sentTarget) => {
+      const result = await runToolContract(nvdAuditCpe, {
+        ...target,
+        kevOnly: true,
+        kevStartDate: '2021-10-01T00:00:00.000Z',
+        kevEndDate: '2022-01-15T00:00:00.000Z',
+        lastModDays: 30,
+        severity: 'CRITICAL',
+      });
+      const echoed = {
+        severity: 'CRITICAL',
+        severityVersion: 'v3',
+        lastModStartDate: '2026-10-16T20:00:00.000Z',
+        lastModEndDate: '2026-11-15T20:00:00.000Z',
+        kevStartDate: '2021-10-01T00:00:00.000Z',
+        kevEndDate: '2022-01-15T00:00:00.000Z',
+        kevOnly: true,
+      };
+
+      expect(result.isError).toBeFalsy();
+      expect(sentParams()).toEqual({
+        resultsPerPage: 20,
+        startIndex: 0,
+        ...sentTarget,
+        hasKev: true,
+        lastModStartDate: echoed.lastModStartDate,
+        lastModEndDate: echoed.lastModEndDate,
+        kevStartDate: echoed.kevStartDate,
+        kevEndDate: echoed.kevEndDate,
+        cvssV3Severity: 'CRITICAL',
+      });
+      expect(result.structuredContent).toHaveProperty('filtersApplied', echoed);
+      expect(result.structuredContent).not.toHaveProperty('datesClamped');
+      const text = textOf(result);
+      expect(text).toContain('**Filters applied:** severity=CRITICAL, severityVersion=v3, ');
+      for (const [key, value] of Object.entries(echoed)) expect(text).toContain(`${key}=${value}`);
+    },
+  );
+
+  it('reports a shorthand clamped to 120 days on both surfaces', async () => {
+    const result = await runToolContract(nvdAuditCpe, { cpeName, pubDays: 200 });
+
+    expect(sentParams()).toMatchObject({
+      pubStartDate: '2026-07-18T20:00:00.000Z',
+      pubEndDate: '2026-11-15T20:00:00.000Z',
+    });
+    expect(result.structuredContent).toHaveProperty('datesClamped', [
+      { param: 'pubDays', original: 200, clamped: 120 },
+    ]);
+    expect(textOf(result)).toContain(
+      'pubDays value 200 exceeded the 120-day maximum and was clamped to 120.',
+    );
+  });
+
+  it('sends the band on the parameter severityVersion names', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      severity: 'HIGH',
+      severityVersion: 'v2',
+    });
+
+    expect(sentParams()).toMatchObject({ cvssV2Severity: 'HIGH' });
+    expect(sentParams()).not.toHaveProperty('cvssV3Severity');
+    expect(result.structuredContent).toHaveProperty('filtersApplied', {
+      severity: 'HIGH',
+      severityVersion: 'v2',
+    });
+  });
+
+  it('rejects CRITICAL on CVSS v2 before any request, with its recovery on both surfaces', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      severity: 'CRITICAL',
+      severityVersion: 'v2',
+    });
+    const hint = 'Use LOW, MEDIUM, or HIGH when severityVersion is';
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_severity_for_version',
+          recovery: { hint: expect.stringContaining(hint) },
+        },
+      },
+    });
+    expect(textOf(result)).toContain(hint);
+    expect(mockClient.get).not.toHaveBeenCalled();
+  });
+
+  it('declares the band and window reasons exactly as nvd_search_cves does', () => {
+    for (const reason of [
+      'invalid_severity_for_version',
+      'mutually_exclusive_params',
+      'missing_date_pair',
+      'invalid_date_format',
+      'date_range_inverted',
+      'date_range_exceeds_max',
+    ]) {
+      const declared = nvdAuditCpe.errors?.find((entry) => entry.reason === reason);
+      expect(declared, reason).toBeDefined();
+      expect(declared, reason).toEqual(
+        nvdSearchCves.errors?.find((entry) => entry.reason === reason),
+      );
+    }
+  });
+
+  /**
+   * The ruled AND: NVD narrows to the v3 band, so totalCount counts the band; severityMin then
+   * filters the fetched page across every version — keeping the v3-HIGH row whose v4 band is
+   * CRITICAL — and the next offset still advances past the row it dropped.
+   */
+  it('composes severity with severityMin: band total, page drop count, and paging past the drop', async () => {
+    mockClient.get.mockResolvedValue({
+      totalResults: 13,
+      vulnerabilities: [V3_HIGH_V4_CRITICAL, V3_HIGH],
+    });
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      severity: 'HIGH',
+      severityMin: 'CRITICAL',
+      limit: 2,
+    });
+
+    expect(sentParams()).toMatchObject({ cvssV3Severity: 'HIGH', resultsPerPage: 2 });
+    expect(result.structuredContent).toMatchObject({
+      cves: [{ cveId: 'CVE-2024-1000' }],
+      totalCount: 13,
+      returned: 1,
+      filteredCount: 1,
+      severityMin: 'CRITICAL',
+      filtersApplied: { severity: 'HIGH', severityVersion: 'v3' },
+      notice:
+        'Results truncated — 13 CVEs match this audit target; set offset to 2 for the next page.',
+    });
+  });
+
+  it.each([
+    ['kevOnly', { kevOnly: true }],
+    ['severity', { severity: 'CRITICAL', severityVersion: 'v4' }],
+    ['a date window', { lastModDays: 7 }],
+  ] as const)(
+    'answers a zero total under %s with the filter-aware notice on both surfaces',
+    async (_filter, filters) => {
+      mockClient.get.mockResolvedValue({ totalResults: 0, vulnerabilities: [] });
+      const result = await runToolContract(nvdAuditCpe, { cpeName, ...filters });
+
+      expect(noticeOf(result)).toBe(FILTERED_ZERO);
+      expect(textOf(result)).toContain(FILTERED_ZERO);
+      expect(noticeOf(result)).not.toContain('a clean audit, not a failed one');
+      expect(noticeOf(result)).not.toContain('nvd_search_cpes');
+    },
+  );
+
+  it('adds no parameter, echo, or notice to an audit without the new inputs', async () => {
+    const result = await runToolContract(nvdAuditCpe, { cpeName, severityVersion: 'v4' });
+
+    expect(sentParams()).toEqual({
+      resultsPerPage: 20,
+      startIndex: 0,
+      cpeName,
+      isVulnerable: true,
+    });
+    expect(result.structuredContent).not.toHaveProperty('filtersApplied');
+    expect(result.structuredContent).not.toHaveProperty('datesClamped');
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(textOf(result)).not.toContain('Filters applied');
+  });
+
+  it('discloses a blank date field without forwarding it, and trims a padded one', async () => {
+    const blank = await runToolContract(nvdAuditCpe, { cpeName, pubStartDate: ' \t ' });
+
+    expect(blank.isError).toBeFalsy();
+    expect(sentParams()).not.toHaveProperty('pubStartDate');
+    expect(blank.structuredContent).not.toHaveProperty('filtersApplied');
+    expect(noticeOf(blank)).toBe('Ignored empty pubStartDate.');
+    expect(textOf(blank)).toContain('Ignored empty pubStartDate.');
+
+    const dates = {
+      pubStartDate: '2026-11-01T00:00:00.000Z',
+      pubEndDate: '2026-11-02T00:00:00.000Z',
+    };
+    const padded = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      pubStartDate: ` ${dates.pubStartDate} `,
+      pubEndDate: `${dates.pubEndDate}\n`,
+    });
+
+    expect(sentParams(1)).toMatchObject(dates);
+    expect(padded.structuredContent).toHaveProperty('filtersApplied', dates);
+  });
+
+  it('names the echoed dates on a shorthand next page, flags re-expansion past offset 0, and replays exactly', async () => {
+    mockClient.get.mockResolvedValue({
+      totalResults: 39,
+      vulnerabilities: [V3_HIGH_V4_CRITICAL, V3_HIGH],
+    });
+    const nextPage =
+      'Results truncated — 39 CVEs match this audit target; set offset to 2 for the next page and send lastModStartDate and lastModEndDate from filtersApplied instead of lastModDays, so the next page reads the same window.';
+    const reexpanded =
+      'lastModDays was expanded at call time, so the window in filtersApplied can differ from the one earlier pages read; to page one fixed window, send the dates echoed on the first page instead of lastModDays.';
+
+    const first = await runToolContract(nvdAuditCpe, { cpeName, lastModDays: 30, limit: 2 });
+    expect(noticeOf(first)).toBe(nextPage);
+    expect(textOf(first)).toContain(nextPage);
+
+    const later = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      lastModDays: 30,
+      limit: 2,
+      offset: 2,
+    });
+    // Past offset 0 filtersApplied holds this call's window, so only the first page's dates are named.
+    expect(noticeOf(later)).toBe(
+      `Results truncated — 39 CVEs match this audit target; set offset to 4 for the next page. ${reexpanded}`,
+    );
+    expect(textOf(later)).toContain(reexpanded);
+
+    const echoed = (first.structuredContent as { filtersApplied: Record<string, string> })
+      .filtersApplied;
+    await runToolContract(nvdAuditCpe, { cpeName, ...echoed, limit: 2 });
+    expect(sentParams(2)).toEqual(sentParams(0));
   });
 });
 
@@ -1035,6 +1494,9 @@ describe('nvdAuditCpe — advertised record contract (issue #37)', () => {
       'configurationNodes',
       'references',
       'cisaKev',
+      'sourceIdentifier',
+      'cveTags',
+      'affectedProducts',
     ]);
   });
 
@@ -1094,6 +1556,50 @@ describe('nvdAuditCpe — NVD CPE rejection carries the declared contract (issue
     });
   });
 
+  /**
+   * Live: a valid CPE with `pubStartDate: "2026-11-01T00:00:00+23:59"` drew NVD's 404 `Invalid ISO
+   * 8601 date/time format`, which reached the caller as `invalid_cpe_format` with a recovery to
+   * re-resolve the CPE. The fault is the date, so the caller gets NVD's diagnosis under the
+   * declared `nvd_request_rejected`, whose recovery names the date form.
+   */
+  it('surfaces a date rejection as the declared nvd_request_rejected, not a CPE fault', async () => {
+    const service = new NvdCveService({} as never, {} as never);
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(service);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+      get: vi
+        .fn()
+        .mockRejectedValue(
+          nvdHttpClientModule.nvdRequestRejected(
+            'cves/2.0',
+            'Invalid ISO 8601 date/time format, see documentation.',
+          ),
+        ),
+    } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName: 'cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*',
+      pubStartDate: '2026-11-01T00:00:00+12:00',
+      pubEndDate: '2026-11-02T00:00:00Z',
+    });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'nvd_request_rejected',
+          recovery: { hint: expect.stringContaining('YYYY-MM-DDThh:mm') },
+        },
+      },
+    });
+    expect(text).toContain('Invalid ISO 8601 date/time format');
+    expect(text).not.toContain('Invalid CPE string');
+  });
+
   it('names both causes of invalid_cpe_format in the error contract', () => {
     const entry = nvdAuditCpe.errors?.find((e) => e.reason === 'invalid_cpe_format');
     expect(entry?.when).toContain('cpe:2.3:');
@@ -1145,6 +1651,101 @@ describe('nvdAuditCpe — configuration nodes reach structuredContent and conten
     expect(text).toContain(
       escapeMarkdownInline('cpe:2.3:h:netapp:a700s:-:*:*:*:*:*:*:*') +
         ' [group 0; AND with sibling nodes; OR within node; not the vulnerable component]',
+    );
+  });
+});
+
+/**
+ * Issue #65 wiring on the audit surface: raw NVD records through the real normalizer and resolver.
+ * The rendering table is pinned at the shared renderer's seam (`tests/tools/full-record.test.ts`)
+ * and the normalization at the service's; this proves the audit carries both and honors its
+ * selector.
+ */
+describe('nvdAuditCpe — CNA/ADP statements reach both surfaces (issue #65)', () => {
+  const cpeName = 'cpe:2.3:o:apple:macos:12.0.0:*:*:*:*:*:*:*';
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  const cvesOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { cves: Array<Record<string, unknown>> }).cves;
+
+  beforeEach(() => {
+    const fake = nvdFake([CVE_2024_23225, CVE_2021_3007]);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      fake as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdSourceServiceModule, 'getNvdSourceService').mockReturnValue(
+      new nvdSourceServiceModule.NvdSourceService({} as never, {} as never),
+    );
+  });
+
+  it('carries resolved affected products, record tags, and score sources by default', async () => {
+    const result = await runToolContract(nvdAuditCpe, { cpeName });
+    expect(result.isError).toBeFalsy();
+
+    const apple = at(cvesOf(result), 0);
+    const disputed = at(cvesOf(result), 1);
+    expect((apple.affectedProducts as Array<{ source: string }>).map((p) => p.source)).toEqual([
+      'product-security@apple.com',
+      'product-security@apple.com',
+      'CISA-ADP',
+      'CISA-ADP',
+    ]);
+    expect(disputed).toMatchObject({
+      sourceIdentifier: 'cve@mitre.org',
+      cveTags: [{ source: 'cve@mitre.org', tags: ['disputed'] }],
+    });
+
+    const text = textOf(result);
+    expect(text).toContain('**Affected Products (CNA/ADP):** 4 product(s)');
+    expect(text).toContain('  - [CISA-ADP] apple / macos · defaultStatus: unknown\n');
+    expect(text).toContain(
+      '| **Source:** cve@mitre.org | **CVE Tags:** [cve@mitre.org] disputed\n',
+    );
+  });
+
+  it('omits affectedProducts from both surfaces with includeAffected: false', async () => {
+    const result = await runToolContract(nvdAuditCpe, { cpeName, includeAffected: false });
+    expect(result.isError).toBeFalsy();
+    for (const cve of cvesOf(result)) expect(cve).not.toHaveProperty('affectedProducts');
+    expect(textOf(result)).not.toContain('Affected Products');
+    expect(at(cvesOf(result), 1)).toHaveProperty('cveTags');
+  });
+
+  it('treats an omitted includeAffected as true', async () => {
+    const omitted = await runToolContract(nvdAuditCpe, { cpeName });
+    const explicit = await runToolContract(nvdAuditCpe, { cpeName, includeAffected: true });
+    expect(explicit.structuredContent).toEqual(omitted.structuredContent);
+    expect(explicit.content).toEqual(omitted.content);
+  });
+
+  it('keeps the affected selector independent of the other two', async () => {
+    const result = await runToolContract(nvdAuditCpe, {
+      cpeName,
+      includeConfigurations: false,
+      includeReferences: false,
+    });
+    const apple = at(cvesOf(result));
+    expect(apple).not.toHaveProperty('configurationNodes');
+    expect(apple).not.toHaveProperty('references');
+    expect(apple.affectedProducts).toHaveLength(4);
+  });
+
+  /** Characterization: a record carrying no source, tags, scorer, or affected products renders with the plain status and CVSS lines. */
+  it('renders the status and CVSS lines of a record without the new fields unchanged', () => {
+    const lines = (nvdAuditCpe.format!({ cves: [FULL_CVE] })[0] as { text: string }).text.split(
+      '\n',
+    );
+    expect(lines).toContain(
+      '**Status:** Analyzed | **Published:** 2021-12-10T10:15:00.000 | **Last Modified:** 2023-11-06T03:18:00.000',
+    );
+    expect(lines).toContain(
+      '  - v3.1 (Primary): 10 CRITICAL — CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H',
     );
   });
 });

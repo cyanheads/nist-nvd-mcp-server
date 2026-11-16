@@ -132,13 +132,35 @@ describe('read limits', () => {
     expect(service.fetchById.mock.calls[0]?.[0]).toEqual(prefix);
     expect(result.structuredContent).toMatchObject({
       requested: 100,
-      requestedLimit: 104,
+      // 104 IDs as sent, 102 distinct: a repeat counts toward neither the cap nor the clamp.
+      requestedLimit: 102,
       effectiveLimit: 100,
       missingIds: ['CVE-2021-10000'],
       unprocessedIds: ['CVE-2021-20000', 'CVE-2021-20001'],
     });
     expect(text(result)).toContain('CVE-2021-20000');
     expect(text(result)).toContain('CVE-2021-20001');
+  });
+  it('clamps a joined 104-ID string exactly as it clamps the same IDs as an array', async () => {
+    const ids = Array.from({ length: 104 }, (_, i) => `CVE-2021-${10000 + i}`);
+    service.fetchById.mockResolvedValue({ cves: [], requested: 100, returned: 0, missingIds: [] });
+    const joined = await runToolContract(nvdGetCve, { cveIds: ids.join(', ') });
+    const array = await runToolContract(nvdGetCve, { cveIds: ids });
+    expect(joined.isError).not.toBe(true);
+    expect(service.fetchById.mock.calls.map((call) => call[0])).toEqual([
+      ids.slice(0, 100),
+      ids.slice(0, 100),
+    ]);
+    expect(joined.structuredContent).toMatchObject({
+      requested: 100,
+      requestedLimit: 104,
+      effectiveLimit: 100,
+      unprocessedIds: ids.slice(100),
+      notice: expect.stringContaining('clamped'),
+    });
+    expect(joined.structuredContent).toEqual(array.structuredContent);
+    expect(joined.content).toEqual(array.content);
+    for (const id of ids.slice(100)) expect(text(joined)).toContain(id);
   });
   it('validates the tail before spending any request', async () => {
     const result = await runToolContract(nvdGetCve, {

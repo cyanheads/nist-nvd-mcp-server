@@ -22,7 +22,7 @@ export const readLimitEnrichment = {
   requestedLimit: z
     .number()
     .optional()
-    .describe('Requested page size or ID count before clamping.'),
+    .describe('Requested page size, or distinct ID count, before clamping.'),
   effectiveLimit: z.number().optional().describe('Page size or ID count used after clamping.'),
 };
 

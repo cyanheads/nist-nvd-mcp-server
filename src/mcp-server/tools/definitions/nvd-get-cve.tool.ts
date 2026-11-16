@@ -8,6 +8,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { flattenCpeMatches, summarizeCpeNodes } from '@/mcp-server/tools/formatting/cpe-match.js';
+import {
+  formatAffectedProducts,
+  formatCvssScore,
+  formatRecordSource,
+} from '@/mcp-server/tools/formatting/full-record.js';
 import { formatSsvc } from '@/mcp-server/tools/formatting/ssvc.js';
 import { applyReadLimit, readLimitEnrichment } from '@/mcp-server/tools/read-limit.js';
 import { UnfilteredBriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
@@ -31,27 +36,47 @@ const CveItemSchema = CveRecordSchema.partial(CONDITIONAL_FULL_CVE_FIELDS)
   )
   .loose();
 
+/** NVD's `cveIds` parameter takes at most 100 IDs per request. */
+const MAX_CVE_IDS = 100;
+
 const CveIdsSchema = z.array(z.string().describe('One CVE ID.')).min(1);
+
+/**
+ * The distinct CVE IDs `cveIds` names, uppercase, in first-seen order. A string is a list split on
+ * commas and whitespace; an array element is one ID. Every piece is validated before any request,
+ * so a malformed piece fails the call quoting that piece alone.
+ */
+function parseCveIds(cveIds: string | string[]): string[] {
+  let pieces = cveIds;
+  if (typeof pieces === 'string') {
+    const split = pieces.split(/[\s,]+/).filter(Boolean);
+    // A string naming no ID is validated as sent, so it fails as an empty ID always has.
+    pieces = split.length > 0 ? split : [pieces];
+  }
+  return [...new Set(pieces.map(validateCveId))];
+}
 
 export const nvdGetCve = tool('nvd_get_cve', {
   title: 'Get CVE Details',
   description:
-    'Fetch one or more CVEs by ID from the NIST National Vulnerability Database. ' +
-    'Returns CVSS scores across all available versions (v2.0, v3.0, v3.1, v4.0), CWE weakness classifications, ' +
-    'affected CPE configurations, CISA KEV fields, current SSVC assessments, and references. ' +
-    'Up to 100 CVE IDs per call. For bulk lookups of more than 10 IDs, use brief: true — ' +
-    'full records for 100 CVEs can exceed 1MB and exhaust context budgets.',
+    "Fetch one or more CVEs by ID from the NIST National Vulnerability Database. Returns CVSS scores across all available versions (v2.0, v3.0, v3.1, v4.0) with who supplied each, CWE weakness classifications, affected CPE configurations from NVD analysis, the affected products the CNA and any ADP state themselves, the record's source and tags, CISA KEV fields, current SSVC assessments, and references. Up to 100 distinct CVE IDs per call. For bulk lookups of more than 10 IDs, use brief: true — full records for 100 CVEs can exceed 1MB and exhaust context budgets.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     cveIds: z
       .union([
-        z.string().describe('A single CVE ID (e.g., "CVE-2021-44228").'),
-        (getServerConfig().clampLimits ? CveIdsSchema : CveIdsSchema.max(100)).describe(
-          'An array of CVE IDs — at least 1. The first 100 are processed; excess IDs are reported unless NVD_CLAMP_LIMITS is false, which rejects them.',
+        z
+          .string()
+          .describe(
+            'One CVE ID, or several separated by commas or whitespace (e.g., "CVE-2024-3400,CVE-2024-6387"), handled exactly as the array form.',
+          ),
+        (getServerConfig().clampLimits ? CveIdsSchema : CveIdsSchema.max(MAX_CVE_IDS)).describe(
+          'An array of CVE IDs — at least 1; an element is never split. IDs match regardless of case and a repeat is fetched once. The first 100 distinct IDs are processed; excess IDs are reported unless NVD_CLAMP_LIMITS is false, which rejects them.',
         ),
       ])
-      .describe('One CVE ID or an array of CVE IDs; at most 100 are fetched per call.'),
+      .describe(
+        'One CVE ID, a comma- or whitespace-separated list of them, or an array; at most 100 distinct IDs are fetched per call.',
+      ),
     brief: z
       .boolean()
       .default(false)
@@ -67,6 +92,10 @@ export const nvdGetCve = tool('nvd_get_cve', {
       .boolean()
       .default(true)
       .describe('When false, omits configurationNodes from full records and their rendered text.'),
+    includeAffected: z
+      .boolean()
+      .default(true)
+      .describe('When false, omits affectedProducts from full records and their rendered text.'),
     allLanguages: z
       .boolean()
       .default(false)
@@ -92,7 +121,7 @@ export const nvdGetCve = tool('nvd_get_cve', {
 
   enrichment: {
     ...readLimitEnrichment,
-    requested: z.number().describe('Number of CVE IDs processed in this call.'),
+    requested: z.number().describe('Number of distinct CVE IDs processed in this call.'),
     returned: z.number().describe('Number of CVE records returned.'),
     missingIds: z
       .array(z.string().describe('A CVE ID not found in NVD.'))
@@ -144,6 +173,13 @@ export const nvdGetCve = tool('nvd_get_cve', {
       recovery: 'Use the format CVE-YYYY-NNNNN (e.g., CVE-2021-44228) and verify each ID.',
     },
     {
+      reason: 'too_many_cve_ids',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A cveIds string names more than 100 distinct IDs and the server rejects oversized requests (NVD_CLAMP_LIMITS=false).',
+      recovery:
+        'Send at most 100 distinct CVE IDs per call, splitting a longer list across several calls.',
+    },
+    {
       reason: 'cve_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A valid-format CVE ID returns no results — the ID is well-formed but does not exist in NVD.',
@@ -159,20 +195,52 @@ export const nvdGetCve = tool('nvd_get_cve', {
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
       recovery:
-        'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
+        'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    },
+    {
+      reason: 'nvd_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD answered with HTTP 5xx, or the request or its response failed on the network, after the client retried.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery: 'NVD is failing or unreachable; wait a minute and retry the call.',
+    },
+    {
+      reason: 'nvd_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'An NVD request outlived its timeout, or the call ran out of its 55-second deadline.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery:
+        'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    },
+    {
+      reason: 'nvd_invalid_api_key',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: "NVD refused the server's configured NVD_API_KEY.",
+      retryable: false,
+      /** Raised by the HTTP client, below this handler, carrying this same hint. */
+      thrownBy: 'service',
+      recovery:
+        "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
     },
   ],
 
   async handler(input, ctx) {
-    const ids = (Array.isArray(input.cveIds) ? input.cveIds : [input.cveIds]).map(validateCveId);
-    const clamped = applyReadLimit(ids.length, 100, 'nvd_get_cve', ctx);
+    const ids = parseCveIds(input.cveIds);
+    // The array form is held to the cap by its schema; a string's count is known only once split.
+    if (!getServerConfig().clampLimits && ids.length > MAX_CVE_IDS) {
+      throw ctx.fail(
+        'too_many_cve_ids',
+        `cveIds names ${ids.length} distinct CVE IDs; at most ${MAX_CVE_IDS} are accepted per call.`,
+      );
+    }
+    const clamped = applyReadLimit(ids.length, MAX_CVE_IDS, 'nvd_get_cve', ctx);
     const selectedIds = ids.slice(0, clamped.limit);
     if (clamped.notice) {
-      const attempted = new Set(selectedIds);
-      const unprocessedIds = [
-        ...new Set(ids.slice(clamped.limit).filter((id) => !attempted.has(id))),
-      ];
-      ctx.enrich({ unprocessedIds });
+      ctx.enrich({ unprocessedIds: ids.slice(clamped.limit) });
       ctx.enrich.notice(clamped.notice);
     }
     ctx.log.info('Fetching CVEs', { count: ids.length, brief: input.brief });
@@ -203,9 +271,14 @@ export const nvdGetCve = tool('nvd_get_cve', {
       return { brief: true, cves: result.cves.map((cve) => toBriefCve(cve)) };
     }
 
-    const cves = input.includeConfigurations
-      ? result.cves
-      : result.cves.map(({ configurationNodes: _configurationNodes, ...cve }) => cve);
+    // Each unselected section is dropped by removal alone, so the fields left keep their order.
+    const cves = result.cves.map((cve) => {
+      const { configurationNodes: _configurationNodes, ...withoutConfigurations } = cve;
+      const configured = input.includeConfigurations ? cve : withoutConfigurations;
+      if (input.includeAffected) return configured;
+      const { affectedProducts: _affectedProducts, ...withoutAffected } = configured;
+      return withoutAffected;
+    });
     return { brief: false, cves };
   },
 
@@ -225,7 +298,8 @@ export const nvdGetCve = tool('nvd_get_cve', {
         `**Status:** ${escapeMarkdownInline(cve.vulnStatus)} | **Published:** ${escapeMarkdownInline(cve.published)}` +
           (cve.lastModified
             ? ` | **Last Modified:** ${escapeMarkdownInline(cve.lastModified)}`
-            : ''),
+            : '') +
+          formatRecordSource(cve),
       );
 
       if (cve.severity) {
@@ -244,11 +318,7 @@ export const nvdGetCve = tool('nvd_get_cve', {
 
       if (cve.cvssScores && cve.cvssScores.length > 0) {
         lines.push('\n**CVSS Scores:**');
-        for (const s of cve.cvssScores) {
-          lines.push(
-            `- v${escapeMarkdownInline(s.version)} (${escapeMarkdownInline(s.sourceType)}): ${s.baseScore} ${escapeMarkdownInline(s.severity)}${s.vectorString ? ` — ${escapeMarkdownInline(s.vectorString)}` : ''}`,
-          );
-        }
+        for (const s of cve.cvssScores) lines.push(`- ${formatCvssScore(s)}`);
       }
 
       // The brief row's single truncated snippet, in place of the per-language array below.
@@ -281,6 +351,8 @@ export const nvdGetCve = tool('nvd_get_cve', {
         lines.push(`**Configurations:** ${summarizeCpeNodes(cve.configurationNodes)}`);
         for (const match of matches) lines.push(`  - ${match}`);
       }
+
+      if (cve.affectedProducts) lines.push(...formatAffectedProducts(cve.affectedProducts));
 
       if (cve.cisaKev) {
         lines.push(`\n**CISA KEV Details:**`);

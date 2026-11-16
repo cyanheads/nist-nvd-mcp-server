@@ -6,8 +6,9 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
+import * as serverConfigModule from '@/config/server-config.js';
 import { nvdAuditCpe } from '@/mcp-server/tools/definitions/nvd-audit-cpe.tool.js';
 import { nvdGetCve } from '@/mcp-server/tools/definitions/nvd-get-cve.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
@@ -16,6 +17,14 @@ import type { CveRecord, RawCveItem, RawCveResponse } from '@/services/nvd-cve/t
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 import * as nvdSourceServiceModule from '@/services/nvd-source/nvd-source-service.js';
 import { at } from '../support/at.js';
+import { expectLinearCost } from '../support/cpu-linearity.js';
+import {
+  CVE_2021_3007,
+  CVE_2021_44228,
+  CVE_2024_23225,
+  CVE_2026_115946,
+  nvdFake,
+} from '../support/nvd-affected-fixtures.js';
 
 /**
  * Source-name resolution has its own suite; every assertion here is about other fields, so the
@@ -61,6 +70,7 @@ const FULL_CVE: CveRecord = {
     requiredAction: 'Apply updates per vendor instructions.',
     vulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
   },
+  affectedProducts: [],
 };
 
 const SPARSE_CVE: CveRecord = {
@@ -72,6 +82,7 @@ const SPARSE_CVE: CveRecord = {
   cvssScores: [],
   weaknesses: [],
   configurationNodes: [],
+  affectedProducts: [],
 };
 
 /**
@@ -189,32 +200,61 @@ describe('nvdGetCve — full rendering parity', () => {
     [
       'nvd_invalid_response',
       JsonRpcErrorCode.ServiceUnavailable,
+      false,
       'Retry later; report a persistent invalid NVD response.',
     ],
     [
       'nvd_request_blocked',
       JsonRpcErrorCode.Forbidden,
+      false,
       'Rephrase query text; otherwise try later or use another network.',
     ],
-  ] as const)('renders the %s recovery on both error surfaces', async (reason, code, hint) => {
-    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
-      fetchById: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
-    } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
-    const result = await runToolContract(nvdGetCve, { cveIds: record.cveId });
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      error: { code, data: { reason, recovery: { hint } } },
-    });
-    expect(result.content).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
-      ]),
-    );
-    expect(nvdGetCve.errors?.find((entry) => entry.reason === reason)).toMatchObject({
-      thrownBy: 'service',
-      retryable: false,
-    });
-  });
+    [
+      'rate_limited',
+      JsonRpcErrorCode.RateLimited,
+      true,
+      'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    ],
+    [
+      'nvd_unavailable',
+      JsonRpcErrorCode.ServiceUnavailable,
+      true,
+      'NVD is failing or unreachable; wait a minute and retry the call.',
+    ],
+    [
+      'nvd_timeout',
+      JsonRpcErrorCode.Timeout,
+      true,
+      'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    ],
+    [
+      'nvd_invalid_api_key',
+      JsonRpcErrorCode.ConfigurationError,
+      false,
+      "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
+    ],
+  ] as const)(
+    'renders the %s recovery on both error surfaces',
+    async (reason, code, retryable, hint) => {
+      vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+        fetchById: vi.fn().mockRejectedValue(new McpError(code, 'NVD request failed.', { reason })),
+      } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+      const result = await runToolContract(nvdGetCve, { cveIds: record.cveId });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code, data: { reason, recovery: { hint } } },
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
+        ]),
+      );
+      expect(nvdGetCve.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+        thrownBy: 'service',
+        retryable,
+      });
+    },
+  );
 });
 
 describe('nvdGetCve', () => {
@@ -867,6 +907,9 @@ describe('nvdGetCve — advertised item schema (issues #37, #38)', () => {
     'configurationNodes',
     'references',
     'cisaKev',
+    'sourceIdentifier',
+    'cveTags',
+    'affectedProducts',
   ];
 
   it('declares the full-record fields the default call actually returns', () => {
@@ -1102,5 +1145,413 @@ describe('nvdGetCve — upstream nesting reaches both surfaces intact', () => {
       escapeMarkdownInline('cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:* (< 1.1.1o)') +
         ' [group 1; vulnerable component]',
     );
+  });
+});
+
+/**
+ * Issue #65, end to end: raw NVD records through the real normalizer and resolver, out both
+ * surfaces. The rendering table itself is pinned at the renderer's own seam
+ * (`tests/tools/full-record.test.ts`); these prove the wiring and the selector.
+ */
+describe('nvdGetCve — CNA/ADP statements reach both surfaces (issue #65)', () => {
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  const cvesOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { cves: Array<Record<string, unknown>> }).cves;
+
+  beforeEach(() => {
+    const fake = nvdFake([CVE_2026_115946, CVE_2021_44228, CVE_2024_23225, CVE_2021_3007]);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      fake as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdSourceServiceModule, 'getNvdSourceService').mockReturnValue(
+      new nvdSourceServiceModule.NvdSourceService({} as never, {} as never),
+    );
+  });
+
+  it('carries the CPANSec package entry, record source, and scorer on both surfaces', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2026-115946' });
+    expect(result.isError).toBeFalsy();
+
+    const cve = at(cvesOf(result));
+    expect(cve).toMatchObject({
+      sourceIdentifier: 'CPANSec',
+      cvssScores: [{ version: '3.1', sourceType: 'Secondary', source: 'CISA-ADP' }],
+      affectedProducts: [
+        {
+          source: 'CPANSec',
+          collectionURL: 'https://cpan.org/modules',
+          packageName: 'XS-libbrotli',
+          packageURL: 'pkg:cpan/XS-libbrotli',
+          modules: ['XS::libbrotli'],
+          programFiles: ['brotli/c/dec/decode.c'],
+          defaultStatus: 'unaffected',
+          versions: [
+            { version: '0', lessThan: '1.2.1.0', versionType: 'custom', status: 'affected' },
+          ],
+        },
+      ],
+    });
+
+    const lines = textOf(result).split('\n');
+    expect(lines).toContain(
+      '**Status:** Deferred | **Published:** 2026-11-01T00:16:34.437 | **Last Modified:** 2026-11-09T17:17:12.067 | **Source:** CPANSec',
+    );
+    expect(lines).toContain(
+      '- v3.1 (Secondary) [CISA-ADP]: 9.8 CRITICAL — CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+    );
+    expect(lines).toContain('**Affected Products (CNA/ADP):** 1 product(s)');
+    expect(lines).toContain(
+      '  - [CPANSec] packageName: XS-libbrotli · collectionURL: https://cpan.org/modules · packageURL: pkg:cpan/XS-libbrotli · defaultStatus: unaffected',
+    );
+    expect(lines).toContain('    - modules: XS::libbrotli');
+    expect(lines).toContain('    - programFiles: brotli/c/dec/decode.c');
+    expect(lines).toContain('    - >= 0 < 1.2.1.0 (custom): affected');
+  });
+
+  it("renders a range's changes directly under it, so fixed points never read as affected", async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2021-44228' });
+    const product = at(cvesOf(result).flatMap((c) => c.affectedProducts as object[]));
+    expect(product).toMatchObject({
+      versionChanges: [
+        { versionIndex: 0, at: '2.3.1', status: 'unaffected' },
+        { versionIndex: 0, at: '2.4', status: 'affected' },
+        { versionIndex: 0, at: '2.12.2', status: 'unaffected' },
+        { versionIndex: 0, at: '2.13.0', status: 'affected' },
+        { versionIndex: 0, at: '2.15.0', status: 'unaffected' },
+      ],
+    });
+
+    const lines = textOf(result).split('\n');
+    const range = lines.indexOf(
+      `    - >= 2.0-beta9 < ${escapeMarkdownInline('log4j-core*')} (custom): affected`,
+    );
+    expect(range).toBeGreaterThan(0);
+    expect(lines.slice(range + 1, range + 6)).toEqual([
+      '      - from 2.3.1: unaffected',
+      '      - from 2.4: affected',
+      '      - from 2.12.2: unaffected',
+      '      - from 2.13.0: affected',
+      '      - from 2.15.0: unaffected',
+    ]);
+  });
+
+  it('leads every product line of a two-group record with that group’s own source', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2024-23225' });
+    expect(
+      (at(cvesOf(result)).affectedProducts as Array<{ source: string }>).map((p) => p.source),
+    ).toEqual(['product-security@apple.com', 'product-security@apple.com', 'CISA-ADP', 'CISA-ADP']);
+
+    const text = textOf(result);
+    expect(text).toContain('**Affected Products (CNA/ADP):** 4 product(s)');
+    expect(text).toContain('  - [product-security@apple.com] Apple / iOS and iPadOS\n');
+    expect(text).toContain('  - [CISA-ADP] apple / ipad_os · defaultStatus: unknown\n');
+    expect(text).toContain(
+      `    - cpes: ${escapeMarkdownInline('cpe:2.3:o:apple:ipad_os:17.0:*:*:*:*:*:*:*')}\n`,
+    );
+  });
+
+  it('puts record tags with their source on the status line', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2021-3007' });
+    expect(at(cvesOf(result)).cveTags).toEqual([{ source: 'cve@mitre.org', tags: ['disputed'] }]);
+    expect(textOf(result)).toContain(
+      '| **Source:** cve@mitre.org | **CVE Tags:** [cve@mitre.org] disputed\n',
+    );
+  });
+
+  it('omits affectedProducts from both surfaces with includeAffected: false', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: ['CVE-2026-115946', 'CVE-2024-23225'],
+      includeAffected: false,
+    });
+    expect(result.isError).toBeFalsy();
+    for (const cve of cvesOf(result)) expect(cve).not.toHaveProperty('affectedProducts');
+    expect(textOf(result)).not.toContain('Affected Products');
+    // The selector touches nothing else: the record's own source and the scorer remain.
+    expect(at(cvesOf(result))).toMatchObject({ sourceIdentifier: 'CPANSec' });
+  });
+
+  it('treats an omitted includeAffected as true', async () => {
+    const omitted = await runToolContract(nvdGetCve, { cveIds: 'CVE-2024-23225' });
+    const explicit = await runToolContract(nvdGetCve, {
+      cveIds: 'CVE-2024-23225',
+      includeAffected: true,
+    });
+    expect(explicit.structuredContent).toEqual(omitted.structuredContent);
+    expect(explicit.content).toEqual(omitted.content);
+    expect(at(cvesOf(omitted))).toHaveProperty('affectedProducts');
+  });
+
+  it('keeps the two section selectors independent', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: 'CVE-2024-23225',
+      includeConfigurations: false,
+    });
+    const cve = at(cvesOf(result));
+    expect(cve).not.toHaveProperty('configurationNodes');
+    expect(cve.affectedProducts).toHaveLength(4);
+  });
+
+  // CVE-2021-3007 carries all three in full: tags, an affected block, and a record source.
+  it('never adds the new fields to brief rows, whatever the selector says', async () => {
+    for (const includeAffected of [true, false]) {
+      const result = await runToolContract(nvdGetCve, {
+        cveIds: 'CVE-2021-3007',
+        brief: true,
+        includeAffected,
+      });
+      const row = at(cvesOf(result));
+      for (const field of ['affectedProducts', 'cveTags', 'sourceIdentifier'])
+        expect(row).not.toHaveProperty(field);
+      expect(textOf(result)).not.toContain('Affected Products');
+    }
+  });
+
+  it('rejects a nonboolean includeAffected', () => {
+    expect(
+      nvdGetCve.input.safeParse({ cveIds: 'CVE-2024-23225', includeAffected: 'false' }).success,
+    ).toBe(false);
+  });
+
+  /** Characterization: a record carrying no source, tags, scorer, or affected products renders with the plain status and CVSS lines. */
+  it('renders the status and CVSS lines of a record without the new fields unchanged', () => {
+    const lines = (
+      nvdGetCve.format!({ brief: false, cves: [FULL_CVE] })[0] as { text: string }
+    ).text.split('\n');
+    expect(lines).toContain(
+      '**Status:** Analyzed | **Published:** 2021-12-10T10:15:00.000 | **Last Modified:** 2023-11-06T03:18:00.000',
+    );
+    expect(lines).toContain(
+      '- v3.1 (Primary): 10 CRITICAL — CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H',
+    );
+  });
+});
+
+describe('nvdGetCve — joined cveIds strings and distinct IDs (issue #71)', () => {
+  let fake: ReturnType<typeof nvdFake>;
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  /** The `cveIds` parameter of every CVE request the call sent to NVD, in order. */
+  const sentIds = () =>
+    fake.get.mock.calls
+      .filter(([endpoint]) => endpoint === 'cves/2.0')
+      .map(([, params]) => params?.cveIds);
+  const distinctIds = (count: number) =>
+    Array.from({ length: count }, (_, i) => `CVE-2021-${10_000 + i}`);
+
+  beforeEach(() => {
+    fake = nvdFake([CVE_2021_44228, CVE_2024_23225]);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      fake as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+  });
+
+  it.each([
+    'CVE-2021-44228,CVE-2024-23225',
+    'CVE-2021-44228 CVE-2024-23225',
+    'CVE-2021-44228, cve-2024-23225,',
+    '\n CVE-2021-44228\t,\r\nCVE-2024-23225 ',
+  ])('fetches both IDs named by %j in one request', async (cveIds) => {
+    const result = await runToolContract(nvdGetCve, { cveIds, brief: true });
+    expect(result.isError).toBeFalsy();
+    expect(sentIds()).toEqual(['CVE-2021-44228,CVE-2024-23225']);
+    expect(result.structuredContent).toMatchObject({
+      requested: 2,
+      returned: 2,
+      cves: [{ cveId: 'CVE-2021-44228' }, { cveId: 'CVE-2024-23225' }],
+    });
+    expect(result.structuredContent).not.toHaveProperty('missingIds');
+    const lines = textOf(result).split('\n');
+    for (const id of ['CVE-2021-44228', 'CVE-2024-23225'])
+      expect(lines).toContain(`## ${escapeMarkdownInline(id)}`);
+    expect(textOf(result)).toContain('**Requested:** 2');
+  });
+
+  it('quotes only the malformed piece of a joined string and sends nothing', async () => {
+    const result = await runToolContract(nvdGetCve, { cveIds: 'CVE-2021-44228,bogus' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cve_id_format', cveId: 'bogus' } },
+    });
+    expect(textOf(result)).toContain('Invalid CVE ID format: "bogus".');
+    expect(fake.get).not.toHaveBeenCalled();
+  });
+
+  it('validates pieces past the 100th before spending a request', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: `${distinctIds(150).join(',')},bogus`,
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cve_id_format', cveId: 'bogus' } },
+    });
+    expect(fake.get).not.toHaveBeenCalled();
+  });
+
+  /** Characterization: a string naming no ID fails as it always has. */
+  it.each(['', '   ', ' , ', ',,\n'])(
+    'fails %j as an invalid ID before any request',
+    async (cveIds) => {
+      const result = await runToolContract(nvdGetCve, { cveIds });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cve_id_format' } },
+      });
+      expect(textOf(result)).toContain('Invalid CVE ID format');
+      expect(fake.get).not.toHaveBeenCalled();
+    },
+  );
+
+  /** Characterization: only the string form is a list; an array element is one ID. */
+  it('never splits an array element', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: ['CVE-2021-44228,CVE-2024-23225'],
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: { reason: 'invalid_cve_id_format', cveId: 'CVE-2021-44228,CVE-2024-23225' },
+      },
+    });
+    expect(fake.get).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, string | string[]]>([
+    ['an array', ['CVE-2021-44228', 'cve-2021-44228', ' CVE-2021-44228 ']],
+    ['a joined string', 'CVE-2021-44228 cve-2021-44228,CVE-2021-44228'],
+  ])('fetches an ID repeated across case in %s once and counts it once', async (_form, cveIds) => {
+    const result = await runToolContract(nvdGetCve, { cveIds, brief: true });
+    expect(sentIds()).toEqual(['CVE-2021-44228']);
+    expect(result.structuredContent).toMatchObject({
+      requested: 1,
+      returned: 1,
+      cves: [{ cveId: 'CVE-2021-44228' }],
+    });
+    expect(textOf(result)).toContain('**Requested:** 1');
+  });
+
+  it('keeps first-occurrence order when it drops a repeat', async () => {
+    const result = await runToolContract(nvdGetCve, {
+      cveIds: 'CVE-2024-23225 CVE-2021-44228 cve-2024-23225',
+      brief: true,
+    });
+    expect(sentIds()).toEqual(['CVE-2024-23225,CVE-2021-44228']);
+    expect(result.structuredContent).toMatchObject({ requested: 2, returned: 2 });
+  });
+
+  it('advertises the string form as a list handled like the array', () => {
+    const cveIds = toJSONSchema(nvdGetCve.input).properties?.cveIds as {
+      anyOf: Array<{ type: string; description: string }>;
+    };
+    const branch = (type: string) =>
+      cveIds.anyOf.find((option) => option.type === type)?.description;
+    expect(branch('string')).toContain('separated by commas or whitespace');
+    expect(branch('array')).toContain('never split');
+    expect(branch('array')).toContain('distinct');
+  });
+
+  describe('with NVD_CLAMP_LIMITS=false', () => {
+    let config: MockInstance<typeof serverConfigModule.getServerConfig>;
+    beforeEach(() => {
+      config = vi
+        .spyOn(serverConfigModule, 'getServerConfig')
+        .mockReturnValue({ requestTimeoutMs: 10_000, clampLimits: false });
+    });
+    afterEach(() => config.mockRestore());
+
+    it('rejects a string naming more than 100 distinct IDs before any request', async () => {
+      const result = await runToolContract(nvdGetCve, { cveIds: distinctIds(101).join(',') });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'too_many_cve_ids',
+            recovery: { hint: expect.stringContaining('at most 100 distinct CVE IDs') },
+          },
+        },
+      });
+      const text = textOf(result);
+      expect(text).toContain('101 distinct CVE IDs');
+      expect(text).toContain('at most 100 distinct CVE IDs');
+      expect(fake.get).not.toHaveBeenCalled();
+    });
+
+    it('accepts a string whose 104 pieces name 100 distinct IDs, with no clamp fields', async () => {
+      const ids = distinctIds(100);
+      const cveIds = [...ids, ...ids.slice(0, 4).map((id) => id.toLowerCase())].join(' ');
+      const result = await runToolContract(nvdGetCve, { cveIds, brief: true });
+      expect(result.isError).toBeFalsy();
+      expect(sentIds()).toEqual([ids.join(',')]);
+      expect(result.structuredContent).toMatchObject({ requested: 100 });
+      for (const field of ['requestedLimit', 'effectiveLimit', 'unprocessedIds', 'notice'])
+        expect(result.structuredContent).not.toHaveProperty(field);
+    });
+  });
+
+  /**
+   * The split runs over a caller-sized string, so its cost is held linear. Timed through the
+   * handler with the service stubbed: nothing waits on a request, so each measurement batches
+   * calls, since one call on a 5k input sits below the timer's resolution. The separator pattern
+   * stays out of Bun's slower regex mode on every shape here, so each one carries the full span.
+   */
+  describe('cost on caller-sized cveIds strings', { timeout: 0 }, () => {
+    const ctx = createMockContext({ errors: nvdGetCve.errors });
+    const FULL_SPAN = 320_000;
+
+    beforeEach(() => {
+      vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
+        fetchById: async (ids: string[]) => ({
+          cves: [],
+          returned: 0,
+          requested: ids.length,
+          missingIds: ids,
+        }),
+      } as unknown as ReturnType<typeof nvdCveServiceModule.getNvdCveService>);
+    });
+
+    /**
+     * Runs the handler on `value` to completion, reporting whether it accepted the string. Only the
+     * format rejection reads as `false`; any other throw fails the test rather than passing as one.
+     */
+    async function accepts(value: string): Promise<boolean> {
+      try {
+        await nvdGetCve.handler(nvdGetCve.input.parse({ cveIds: value, brief: true }), ctx);
+        return true;
+      } catch (err) {
+        if (err instanceof McpError && err.data?.reason === 'invalid_cve_id_format') return false;
+        throw err;
+      }
+    }
+
+    it.each([
+      ['a long line ending in a break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`, false],
+      ['breaks throughout', (n: number) => '  \r\n'.repeat(n / 4), false],
+      ['an ID with a long digit run', (n: number) => `CVE-2021-${'4'.repeat(n)}`, true],
+      ['a long digit run with no closer', (n: number) => `CVE-2021-${'4'.repeat(n)}x`, false],
+      [
+        'distinct IDs joined by a comma and a space',
+        (n: number) => distinctIds(Math.ceil(n / 16)).join(', '),
+        true,
+      ],
+    ] as const)('stays linear on %s', async (_shape, build, expected) => {
+      await expectLinearCost({
+        build,
+        expected,
+        maxSize: FULL_SPAN,
+        run: accepts,
+        boundMicros: (size) => 2_000 + size / 10,
+      });
+    });
   });
 });

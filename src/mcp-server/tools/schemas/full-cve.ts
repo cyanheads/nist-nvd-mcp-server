@@ -5,9 +5,9 @@
  *
  * Optionality here is load-bearing, not cosmetic: the framework parses every success return
  * against the declared output schema, so a field is required only when the normalizer assigns
- * it unconditionally. `descriptions`, `cvssScores`, `weaknesses`, and `configurationNodes` always
- * default to `[]`; `references`, `severity`, and `cisaKev` are spread-gated upstream and stay
- * optional.
+ * it unconditionally. `descriptions`, `cvssScores`, `weaknesses`, `configurationNodes`, and
+ * `affectedProducts` always default to `[]`; `references`, `severity`, `cisaKev`,
+ * `sourceIdentifier`, and `cveTags` are spread-gated upstream and stay optional.
  * @module src/mcp-server/tools/schemas/full-cve
  */
 
@@ -15,10 +15,113 @@ import { z } from '@cyanheads/mcp-ts-core';
 
 const CvssScoreSchema = z.object({
   version: z.string().describe('CVSS version (e.g., "2.0", "3.1", "4.0").'),
-  sourceType: z.string().describe('Score source: "Primary" = NVD, "Secondary" = CNA.'),
+  sourceType: z
+    .string()
+    .describe(
+      'NVD\'s label for this score, "Primary" or "Secondary". It does not say who scored it — a CNA\'s score can be Primary and an ADP\'s Secondary; source names the scorer.',
+    ),
   baseScore: z.number().describe('Base score (0.0–10.0).'),
   severity: z.string().describe('Severity label: CRITICAL, HIGH, MEDIUM, or LOW.'),
   vectorString: z.string().optional().describe('CVSS vector string.'),
+  source: z
+    .string()
+    .optional()
+    .describe(
+      'Who supplied the score, as the contributor name NVD publishes for it (e.g. "CISA-ADP"). Contributors NVD identifies by email address keep that address (e.g. "nvd@nist.gov"); an identifier absent from NVD\'s contributor dictionary passes through as its raw value. Absent when NVD names no source.',
+    ),
+});
+
+const AffectedProductSchema = z.object({
+  source: z
+    .string()
+    .optional()
+    .describe(
+      'Who made this statement — the CNA or an ADP — as the contributor name NVD publishes for it (e.g. "CISA-ADP"). Contributors NVD identifies by email address keep that address (e.g. "security@apache.org"); an identifier absent from NVD\'s contributor dictionary passes through as its raw value.',
+    ),
+  vendor: z.string().optional().describe('Vendor, project, or maintainer of the product.'),
+  product: z.string().optional().describe('Product name.'),
+  collectionURL: z
+    .string()
+    .optional()
+    .describe('Package collection that gives packageName its meaning (e.g. a registry URL).'),
+  packageName: z.string().optional().describe('Package name within collectionURL.'),
+  packageURL: z.string().optional().describe('Package URL (purl) for the package.'),
+  repo: z.string().optional().describe('Source code repository URL.'),
+  defaultStatus: z
+    .string()
+    .optional()
+    .describe(
+      'Status of every version the versions list does not cover: affected, unaffected, or unknown. Absent when the contributor stated none, which the CVE schema reads as unknown.',
+    ),
+  cpes: z
+    .array(z.string().describe('One CPE name.'))
+    .optional()
+    .describe('CPE names the contributor attached to this product.'),
+  modules: z
+    .array(z.string().describe('One module or component.'))
+    .optional()
+    .describe('Affected modules, components, or features.'),
+  programFiles: z
+    .array(z.string().describe('One source file path.'))
+    .optional()
+    .describe('Affected source code files.'),
+  programRoutines: z
+    .array(
+      z
+        .object({ name: z.string().describe('Function, method, or routine name.') })
+        .describe('One affected routine.'),
+    )
+    .optional()
+    .describe('Affected functions, methods, or routines.'),
+  platforms: z
+    .array(z.string().describe('One platform.'))
+    .optional()
+    .describe('Platforms the statement is limited to. Absent means every relevant platform.'),
+  versions: z
+    .array(
+      z
+        .object({
+          version: z
+            .string()
+            .optional()
+            .describe('A single version, or the inclusive lower bound of a range.'),
+          status: z
+            .string()
+            .optional()
+            .describe('Status of this version or range: affected, unaffected, or unknown.'),
+          versionType: z
+            .string()
+            .optional()
+            .describe(
+              'Version scheme a range is compared under (e.g. "semver", "git", "custom"). Absent on a single version.',
+            ),
+          lessThan: z.string().optional().describe('Exclusive upper bound of the range.'),
+          lessThanOrEqual: z.string().optional().describe('Inclusive upper bound of the range.'),
+        })
+        .describe('One version or version range.'),
+    )
+    .optional()
+    .describe(
+      'Versions and ranges with their status, in the order the contributor listed them. A range can change status partway through; versionChanges carries those points.',
+    ),
+  versionChanges: z
+    .array(
+      z
+        .object({
+          versionIndex: z
+            .number()
+            .describe('Zero-based index of the versions entry whose range this change is inside.'),
+          at: z.string().describe('Version at which the status changes.'),
+          status: z
+            .string()
+            .describe('Status from this version on, until the next change or the range end.'),
+        })
+        .describe('One status change inside a version range.'),
+    )
+    .optional()
+    .describe(
+      'Status changes inside version ranges, moved out of their range so each stays addressable; versionIndex names the range. Within one range, sort by version under its versionType before applying them.',
+    ),
 });
 
 const TopSeveritySchema = z.object({
@@ -164,6 +267,37 @@ export const CveRecordSchema = z.object({
     })
     .optional()
     .describe('CISA KEV fields. Present only when CVE is in the KEV catalog.'),
+  sourceIdentifier: z
+    .string()
+    .optional()
+    .describe(
+      'The contributor NVD lists as the record\'s source — the CNA that submitted it — as the contributor name NVD publishes for it (e.g. "CPANSec"). Contributors NVD identifies by email address keep that address (e.g. "cve@mitre.org"); an identifier absent from NVD\'s contributor dictionary passes through as its raw value.',
+    ),
+  cveTags: z
+    .array(
+      z
+        .object({
+          source: z
+            .string()
+            .optional()
+            .describe(
+              'Who attached the tags, as the contributor name NVD publishes for it; email-form identifiers keep their address.',
+            ),
+          tags: z
+            .array(z.string().describe('One tag.'))
+            .describe(
+              'Tags: "disputed", "unsupported-when-assigned", or "exclusively-hosted-service".',
+            ),
+        })
+        .describe("One contributor's tags."),
+    )
+    .optional()
+    .describe('Tags contributors attached to the CVE. Absent when none did.'),
+  affectedProducts: z
+    .array(AffectedProductSchema.describe('One product statement.'))
+    .describe(
+      'Affected products as the CNA and any ADP state them, one entry per product — their own statement, not NVD analysis, and often the only product and version evidence on a record NVD has not analyzed. Read versions with versionChanges and defaultStatus. Empty when no contributor sent any.',
+    ),
 });
 
 /**
@@ -177,4 +311,5 @@ export const CONDITIONAL_FULL_CVE_FIELDS = {
   cvssScores: true,
   weaknesses: true,
   configurationNodes: true,
+  affectedProducts: true,
 } as const;

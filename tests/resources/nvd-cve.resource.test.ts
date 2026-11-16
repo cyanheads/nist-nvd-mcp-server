@@ -3,7 +3,7 @@
  * @module tests/resources/nvd-cve.resource.test
  */
 
-import { forbidden, JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,14 @@ import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 import type { CveRecord } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
+import * as nvdSourceServiceModule from '@/services/nvd-source/nvd-source-service.js';
+import { at } from '../support/at.js';
+import {
+  CVE_2023_4863,
+  CVE_2026_67186,
+  CVE_2026_115946,
+  nvdFake,
+} from '../support/nvd-affected-fixtures.js';
 
 const FULL_CVE: CveRecord = {
   cveId: 'CVE-2021-44228',
@@ -30,6 +38,7 @@ const FULL_CVE: CveRecord = {
   severity: { label: 'CRITICAL', score: 10.0, fromVersion: '3.1' },
   weaknesses: [{ source: 'NVD', cweIds: ['CWE-20'] }],
   configurationNodes: [],
+  affectedProducts: [],
 };
 
 describe('nvdCveResource JSON-RPC failure contract', () => {
@@ -37,20 +46,47 @@ describe('nvdCveResource JSON-RPC failure contract', () => {
     [
       'nvd_invalid_response',
       JsonRpcErrorCode.ServiceUnavailable,
+      false,
       'Try again later; if the failure persists, report the failing tool call.',
     ],
     [
       'nvd_request_blocked',
       JsonRpcErrorCode.Forbidden,
+      false,
       'Rephrase query text, or try again later or from another network.',
     ],
-  ] as const)('fills %s recovery at resources/read', async (reason, code, hint) => {
-    const error =
-      reason === 'nvd_invalid_response'
-        ? serviceUnavailable('Unusable response', { reason, retryable: false })
-        : forbidden('Blocked request', { reason, retryable: false });
+    [
+      'rate_limited',
+      JsonRpcErrorCode.RateLimited,
+      true,
+      'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    ],
+    [
+      'nvd_unavailable',
+      JsonRpcErrorCode.ServiceUnavailable,
+      true,
+      'NVD is failing or unreachable; wait a minute and retry the call.',
+    ],
+    [
+      'nvd_timeout',
+      JsonRpcErrorCode.Timeout,
+      true,
+      'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    ],
+    [
+      'nvd_invalid_api_key',
+      JsonRpcErrorCode.ConfigurationError,
+      false,
+      "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
+    ],
+  ] as const)('fills %s recovery at resources/read', async (reason, code, retryable, hint) => {
+    expect(nvdCveResource.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+      retryable,
+    });
     vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue({
-      fetchById: vi.fn().mockRejectedValue(error),
+      fetchById: vi
+        .fn()
+        .mockRejectedValue(new McpError(code, 'NVD request failed.', { reason, retryable })),
     } as never);
     const worker = createWorkerHandler({
       name: 'resource-contract-test',
@@ -189,6 +225,7 @@ describe('nvdCveResource', () => {
       cvssScores: [],
       weaknesses: [],
       configurationNodes: [],
+      affectedProducts: [],
     };
     mockService.fetchById.mockResolvedValue({ cves: [sparseCve], returned: 1, requested: 1 });
     const ctx = createMockContext({ errors: nvdCveResource.errors });
@@ -238,5 +275,56 @@ describe('nvdCveResource — absent CVE (service-level throw)', () => {
       data: { reason: 'cve_not_found' },
     });
     expect(declaredRecovery('cve_not_found')).toContain('nvd_search_cves');
+  });
+});
+
+/**
+ * Issue #65: the resource has no section selectors, so it always carries `affectedProducts` —
+ * the CNA's statement when NVD sends one, `[]` when it sends none — beside the record's source,
+ * tags, and score sources.
+ */
+describe('nvdCveResource — CNA/ADP statements (issue #65)', () => {
+  beforeEach(() => {
+    const fake = nvdFake([CVE_2026_115946, CVE_2023_4863, CVE_2026_67186]);
+    vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue(
+      fake as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>,
+    );
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(
+      new NvdCveService({} as never, {} as never),
+    );
+    vi.spyOn(nvdSourceServiceModule, 'getNvdSourceService').mockReturnValue(
+      new nvdSourceServiceModule.NvdSourceService({} as never, {} as never),
+    );
+  });
+
+  const read = async (cveId: string) =>
+    (await nvdCveResource.handler(
+      resourceParams.parse({ cveId }),
+      createMockContext({ errors: nvdCveResource.errors }),
+    )) as CveRecord;
+
+  it('carries the resolved CNA statement and record source', async () => {
+    const cve = await read('CVE-2026-115946');
+    expect(cve.sourceIdentifier).toBe('CPANSec');
+    expect(cve.affectedProducts).toEqual([
+      expect.objectContaining({
+        source: 'CPANSec',
+        packageURL: 'pkg:cpan/XS-libbrotli',
+        versions: [
+          { version: '0', status: 'affected', versionType: 'custom', lessThan: '1.2.1.0' },
+        ],
+      }),
+    ]);
+    expect(at(cve.cvssScores).source).toBe('CISA-ADP');
+  });
+
+  it('carries an empty affectedProducts when NVD sends no block', async () => {
+    const cve = await read('CVE-2026-67186');
+    expect(cve.affectedProducts).toEqual([]);
+  });
+
+  it("names each score's source beside NVD's own", async () => {
+    const cve = await read('CVE-2023-4863');
+    expect(cve.cvssScores.map((s) => s.source)).toEqual(['nvd@nist.gov', 'CISA-ADP']);
   });
 });

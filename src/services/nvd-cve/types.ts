@@ -46,8 +46,50 @@ export type SsvcAssessment = {
   decisionPoints: z.infer<typeof rawSsvcMetricsSchema>[number]['ssvcData']['options'];
 };
 
+/**
+ * One CVE JSON 5 product statement inside NVD's `affected[].affectedData[]`. Every key is optional
+ * here even where NVD's schema requires it: the block is the CNA's or ADP's own statement, and an
+ * absent field must stay absent rather than fail the whole page it arrived on.
+ */
+const rawAffectedProductSchema = z.looseObject({
+  vendor: z.string().optional(),
+  product: z.string().optional(),
+  collectionURL: z.string().optional(),
+  packageName: z.string().optional(),
+  packageURL: z.string().optional(),
+  repo: z.string().optional(),
+  defaultStatus: z.string().optional(),
+  cpes: z.array(z.string()).optional(),
+  modules: z.array(z.string()).optional(),
+  programFiles: z.array(z.string()).optional(),
+  programRoutines: z.array(z.looseObject({ name: z.string().optional() })).optional(),
+  platforms: z.array(z.string()).optional(),
+  versions: z
+    .array(
+      z.looseObject({
+        version: z.string().optional(),
+        status: z.string().optional(),
+        versionType: z.string().optional(),
+        lessThan: z.string().optional(),
+        lessThanOrEqual: z.string().optional(),
+        changes: z
+          .array(z.looseObject({ at: z.string().optional(), status: z.string().optional() }))
+          .optional(),
+      }),
+    )
+    .optional(),
+});
+
 /** Raw CVE item from the NVD API response. */
 const rawCveItemSchema = z.looseObject({
+  affected: z
+    .array(
+      z.looseObject({
+        source: z.string().optional(),
+        affectedData: z.array(rawAffectedProductSchema).optional(),
+      }),
+    )
+    .optional(),
   cisaActionDue: z.string().optional(),
   cisaExploitAdd: z.string().optional(),
   cisaRequiredAction: z.string().optional(),
@@ -77,6 +119,14 @@ const rawCveItemSchema = z.looseObject({
             }),
           )
           .optional(),
+      }),
+    )
+    .optional(),
+  cveTags: z
+    .array(
+      z.looseObject({
+        sourceIdentifier: z.string().optional(),
+        tags: z.array(z.string()).optional(),
       }),
     )
     .optional(),
@@ -174,7 +224,12 @@ export interface CvssScore {
   baseScore: number;
   /** Severity label (e.g., "CRITICAL", "HIGH", "MEDIUM", "LOW"). */
   severity: string;
-  /** Score source type ("Primary" = NVD, "Secondary" = CNA). */
+  /** Who supplied the score, resolved to the contributor name. Absent when NVD names no source. */
+  source?: string;
+  /**
+   * NVD's `Primary`/`Secondary` label. It does not say who scored: a CNA's score can be Primary and
+   * an ADP's Secondary, so `source` is the field that names the scorer.
+   */
   sourceType: string;
   /** CVSS vector string. */
   vectorString?: string;
@@ -198,6 +253,48 @@ export interface CisaKev {
   exploitAddDate: string;
   requiredAction: string;
   vulnerabilityName: string;
+}
+
+/**
+ * One product statement from a CNA's or ADP's `affected` block, with its group's `source` hoisted
+ * into the entry. Fields carry what the contributor sent and stay absent when it sent nothing — no
+ * `defaultStatus` or `versionType` is filled in. Empty lists are dropped as carrying no statement.
+ */
+export interface AffectedProduct {
+  collectionURL?: string;
+  cpes?: string[];
+  defaultStatus?: string;
+  modules?: string[];
+  packageName?: string;
+  packageURL?: string;
+  platforms?: string[];
+  product?: string;
+  programFiles?: string[];
+  programRoutines?: Array<{ name: string }>;
+  repo?: string;
+  /** The contributor that made the statement, resolved to its name. */
+  source?: string;
+  vendor?: string;
+  /**
+   * Upstream's `versions[].changes[]`, hoisted out of their range so the record stays within the
+   * definition linter's walk depth. `versionIndex` names the `versions` entry a change belongs to,
+   * the way `groupIndex` names a configuration node's group.
+   */
+  versionChanges?: Array<{ versionIndex: number; at: string; status: string }>;
+  versions?: Array<{
+    lessThan?: string;
+    lessThanOrEqual?: string;
+    status?: string;
+    version?: string;
+    versionType?: string;
+  }>;
+}
+
+/** Tags a contributor attached to a CVE (`disputed`, `unsupported-when-assigned`, …). */
+export interface CveTag {
+  /** The contributor that attached the tags, resolved to its name. */
+  source?: string;
+  tags: string[];
 }
 
 /**
@@ -242,6 +339,12 @@ export type CveRecord = {
   severity?: TopSeverity;
   vulnStatus: string;
   weaknesses: Array<{ source: string; cweIds: string[] }>;
+  /** The contributor NVD lists as the record's source, resolved to its name. */
+  sourceIdentifier?: string;
+  /** Absent when no contributor tagged the record. */
+  cveTags?: CveTag[];
+  /** The CNA's and ADPs' own product statements, distinct from NVD's `configurationNodes`. */
+  affectedProducts: AffectedProduct[];
 };
 
 /** Brief CVE record for search results and bulk lookups. See `CveRecord` on the alias form. */
