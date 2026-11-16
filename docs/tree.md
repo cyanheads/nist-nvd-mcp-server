@@ -1,6 +1,6 @@
 # nist-nvd-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 07:09:35
+Generated on: 2026-11-16 05:09:04
 
 ```text
 nist-nvd-mcp-server/
@@ -162,10 +162,12 @@ nist-nvd-mcp-server/
 │   │       │   └── nvd-search-cves.tool.ts
 │   │       ├── formatting/
 │   │       │   ├── cpe-match.ts
+│   │       │   ├── full-record.ts
 │   │       │   └── ssvc.ts
 │   │       ├── schemas/
 │   │       │   ├── brief-cve.ts
 │   │       │   └── full-cve.ts
+│   │       ├── date-windows.ts
 │   │       └── read-limit.ts
 │   ├── services/
 │   │   ├── nvd-cpe/
@@ -198,9 +200,14 @@ nist-nvd-mcp-server/
 │   │   ├── nvd-response-validation.test.ts
 │   │   └── nvd-source-service.test.ts
 │   ├── support/
-│   │   └── at.ts
+│   │   ├── at.ts
+│   │   ├── cpu-linearity.ts
+│   │   ├── nvd-affected-fixtures.ts
+│   │   └── time-zone.ts
 │   ├── tools/
 │   │   ├── cpe-match.test.ts
+│   │   ├── date-windows.test.ts
+│   │   ├── full-record.test.ts
 │   │   ├── nvd-audit-cpe.tool.test.ts
 │   │   ├── nvd-get-cve-history.tool.test.ts
 │   │   ├── nvd-get-cve.tool.test.ts

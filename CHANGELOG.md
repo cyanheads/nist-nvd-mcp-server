@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-15
+
+Full CVE records carry CNA and ADP affected products, record tags, and each score's supplier. KEV-addition windows on search and audit, server-side audit filters, and one 55-second deadline per call with declared nvd_timeout and nvd_unavailable errors.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-26 · ⚠️ Breaking
 
 Full CVE evidence and reliable NVD reads.
