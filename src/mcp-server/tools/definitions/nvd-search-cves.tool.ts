@@ -1,11 +1,22 @@
 /**
- * @fileoverview Tool for searching CVEs by keyword, severity, CWE, date range, or KEV status.
+ * @fileoverview Tool for searching CVEs by keyword, severity, CWE, publication, last-modified, or
+ * KEV-addition date window, or KEV status.
  * @module src/mcp-server/tools/definitions/nvd-search-cves
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  dateWindowEcho,
+  dateWindowEnrichment,
+  dateWindowInput,
+  renderDatesClamped,
+  renderFiltersApplied,
+  resolveDateWindows,
+  windowReexpandedNotice,
+  windowReplayClause,
+} from '@/mcp-server/tools/date-windows.js';
 import {
   applyReadLimit,
   readLimitEnrichment,
@@ -14,24 +25,10 @@ import {
 import { BriefCveRecordSchema } from '@/mcp-server/tools/schemas/brief-cve.js';
 import { getNvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
 
-const MAX_DATE_RANGE_DAYS = 120;
-
-/** Returns the date N days ago from now as ISO 8601 string (milliseconds zeroed, UTC). */
-function daysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().replace(/\.\d{3}Z$/, '.000Z');
-}
-
-/** Returns the current datetime as ISO 8601 string (milliseconds zeroed, UTC). */
-function nowIso(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z');
-}
-
 export const nvdSearchCves = tool('nvd_search_cves', {
   title: 'Search CVEs',
   description:
-    'Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. The primary discovery tool for vulnerability surveillance and triage workflows. pubDays and lastModDays expand to date pairs; values over 120 days are clamped to the NVD maximum and reported in the response enrichment. Returns brief summaries — call nvd_get_cve for full detail on specific IDs. At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID). Blank string filters are omitted with a notice; nonblank strings are trimmed.',
+    'Search CVEs by keyword, severity, CWE, publication or last-modified date, CISA KEV status, or the date CISA added a CVE to KEV. The primary discovery tool for vulnerability surveillance and triage workflows. pubDays, lastModDays, and kevDays expand to date pairs ending at call time; values over 120 days are clamped to the NVD maximum and reported in the response enrichment. A shorthand re-expands on every call, so page with the dates echoed in filtersApplied. Returns brief summaries — call nvd_get_cve for full detail on specific IDs. At least one filter is recommended; omitting all filters returns CVEs in default NVD index order (oldest first by CVE ID). Blank string filters are omitted with a notice; nonblank strings are trimmed.',
   annotations: { readOnlyHint: true, openWorldHint: false },
 
   input: z.object({
@@ -62,52 +59,12 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       .string()
       .optional()
       .describe('Filter by CWE weakness ID (e.g., "CWE-79", "NVD-CWE-Other").'),
-    pubDays: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe(
-        'CVEs published in the last N days (max 120; values over 120 are clamped). ' +
-          'Mutually exclusive with pubStartDate/pubEndDate.',
-      ),
-    lastModDays: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe(
-        'CVEs last modified in the last N days (max 120; values over 120 are clamped). ' +
-          'Mutually exclusive with lastModStartDate/lastModEndDate.',
-      ),
-    pubStartDate: z
-      .string()
-      .optional()
-      .describe(
-        'ISO 8601 datetime for publication range start. Both pubStartDate and pubEndDate required together. ' +
-          'Mutually exclusive with pubDays.',
-      ),
-    pubEndDate: z
-      .string()
-      .optional()
-      .describe(
-        'ISO 8601 datetime for publication range end. Both pubStartDate and pubEndDate required together.',
-      ),
-    lastModStartDate: z
-      .string()
-      .optional()
-      .describe(
-        'ISO 8601 datetime for last-modified range start. Both required together. Mutually exclusive with lastModDays.',
-      ),
-    lastModEndDate: z
-      .string()
-      .optional()
-      .describe('ISO 8601 datetime for last-modified range end. Both required together.'),
+    ...dateWindowInput,
     kevOnly: z
       .boolean()
       .default(false)
       .describe(
-        'When true, filters results to CVEs in the CISA Known Exploited Vulnerabilities catalog.',
+        'When true, filters results to CVEs in the CISA Known Exploited Vulnerabilities catalog, whenever CISA added them. A KEV window (kevDays or kevStartDate/kevEndDate) already returns only catalog members.',
       ),
     noRejected: z
       .boolean()
@@ -130,21 +87,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     totalCount: z.number().describe('Total matching CVEs in NVD before pagination.'),
     returned: z.number().describe('Number of CVEs returned in this response.'),
     offset: z.number().describe('Page offset used in this query.'),
-    datesClamped: z
-      .array(
-        z
-          .object({
-            param: z.string().describe('The parameter that was clamped (pubDays or lastModDays).'),
-            original: z.number().describe('The original value supplied.'),
-            clamped: z.number().describe('The clamped value used (max 120).'),
-          })
-          .describe('A single clamping event for one convenience date parameter.'),
-      )
-      .optional()
-      .describe(
-        'Entries for any pubDays/lastModDays values that exceeded 120 and were auto-clamped. ' +
-          'Absent when no clamping occurred.',
-      ),
+    ...dateWindowEnrichment,
     filtersApplied: z
       .object({
         keyword: z.string().optional().describe('The keyword filter that was applied.'),
@@ -168,19 +111,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
             'The CVSS version the severity filter matched on. Present only alongside severity.',
           ),
         cweId: z.string().optional().describe('The CWE weakness filter that was applied.'),
-        pubStartDate: z
-          .string()
-          .optional()
-          .describe('Effective publication range start sent to NVD.'),
-        pubEndDate: z.string().optional().describe('Effective publication range end sent to NVD.'),
-        lastModStartDate: z
-          .string()
-          .optional()
-          .describe('Effective last-modified range start sent to NVD.'),
-        lastModEndDate: z
-          .string()
-          .optional()
-          .describe('Effective last-modified range end sent to NVD.'),
+        ...dateWindowEcho,
         kevOnly: z
           .boolean()
           .optional()
@@ -198,7 +129,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       .string()
       .optional()
       .describe(
-        'Ignored blank filters and paging guidance: distinguishes no matches, an exhausted offset, and an inconsistent empty upstream page; on a partial page, names the next offset.',
+        "Ignored blank filters and paging guidance: distinguishes no matches, an exhausted offset, and an inconsistent empty upstream page; on a partial page, names the next offset and, on the first page of a window a shorthand set, the filtersApplied dates to send in its place; past offset 0, flags a shorthand window re-expanded for this call and points to the first page's dates instead.",
       ),
   },
 
@@ -206,23 +137,8 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     notice: { render: (notice) => (notice ? `> ${escapeMarkdownInline(notice)}` : '') },
     returned: { label: 'Returned' },
     offset: { label: 'Offset' },
-    datesClamped: {
-      render: (clamped) =>
-        clamped
-          ?.map(
-            (c) =>
-              `> **Note:** ${c.param} value ${c.original} exceeded the 120-day maximum and was clamped to ${c.clamped}.`,
-          )
-          .join('\n') ?? '',
-    },
-    filtersApplied: {
-      render: (filters) =>
-        filters
-          ? `**Filters applied:** ${Object.entries(filters)
-              .map(([key, value]) => `${key}=${escapeMarkdownInline(String(value))}`)
-              .join(', ')}`
-          : '',
-    },
+    datesClamped: { render: renderDatesClamped },
+    filtersApplied: { render: renderFiltersApplied },
   },
 
   errors: [
@@ -249,7 +165,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       retryable: false,
       thrownBy: 'service',
       recovery:
-        'Use case-sensitive CWE-<number>, NVD-CWE-Other, or NVD-CWE-noinfo for cweId, and ISO 8601 datetimes with a time component such as 2024-01-01T00:00:00.000Z for date fields. Check the rejected parameter named in the message.',
+        'Use case-sensitive CWE-<number>, NVD-CWE-Other, or NVD-CWE-noinfo for cweId, and YYYY-MM-DDThh:mm[:ss[.fraction]] with an optional Z or ±hh:mm offset, such as 2024-01-01T00:00:00.000Z, for date fields. Check the rejected parameter named in the message.',
     },
     {
       reason: 'exact_phrase_without_keyword',
@@ -258,37 +174,45 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       recovery:
         'Supply the phrase in keyword alongside exactPhrase, or drop exactPhrase and search on the other filters.',
     },
+    // The five date reasons below are raised by the shared resolver in date-windows.ts.
     {
       reason: 'mutually_exclusive_params',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Both pubDays and pubStartDate/pubEndDate provided, or both lastModDays and lastModStartDate/lastModEndDate.',
+      when: 'A date shorthand was sent with its explicit range: pubDays with pubStartDate/pubEndDate, lastModDays with lastModStartDate/lastModEndDate, or kevDays with kevStartDate/kevEndDate.',
+      thrownBy: 'service',
       recovery:
-        'Use either the convenience shorthand (pubDays) or the explicit date range (pubStartDate + pubEndDate), not both.',
+        'Use either the convenience shorthand (pubDays, lastModDays, or kevDays) or its explicit date range (start + end date), not both.',
     },
     {
       reason: 'missing_date_pair',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of pubStartDate/pubEndDate (or lastModStartDate/lastModEndDate) was provided — NVD requires both.',
+      when: 'Only one end of a date range was provided (pubStartDate/pubEndDate, lastModStartDate/lastModEndDate, or kevStartDate/kevEndDate) — NVD requires both.',
+      thrownBy: 'service',
       recovery:
-        'Provide both the start and end date, or use pubDays/lastModDays instead of an explicit date range.',
+        'Provide both the start and end date, or use pubDays, lastModDays, or kevDays instead of an explicit date range.',
     },
     {
       reason: 'date_range_inverted',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The end date is before the start date.',
+      when: 'The end date of a date range is before its start date.',
+      thrownBy: 'service',
       recovery: 'Ensure the end date is after the start date.',
     },
     {
       reason: 'date_range_exceeds_max',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Explicit pubStartDate/pubEndDate or lastModStartDate/lastModEndDate span more than 120 days.',
-      recovery: 'Narrow the date range to 120 days or fewer, or use multiple paginated queries.',
+      when: 'An explicit date range (pubStartDate/pubEndDate, lastModStartDate/lastModEndDate, or kevStartDate/kevEndDate) spans more than 120 days.',
+      thrownBy: 'service',
+      recovery:
+        'Narrow the date range to 120 days or fewer, or split it into consecutive windows of at most 120 days and query each.',
     },
     {
       reason: 'invalid_date_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A date string provided for pubStartDate, pubEndDate, lastModStartDate, or lastModEndDate is not a valid ISO 8601 datetime.',
-      recovery: 'Use ISO 8601 format, e.g. 2024-01-01T00:00:00.000Z.',
+      when: 'A date field (pubStartDate, pubEndDate, lastModStartDate, lastModEndDate, kevStartDate, or kevEndDate) is not a date and time in the form NVD accepts.',
+      thrownBy: 'service',
+      recovery:
+        'Send YYYY-MM-DDThh:mm[:ss[.fraction]] with an optional Z or ±hh:mm offset, e.g. 2024-01-01T00:00:00.000Z; a value without an offset is read as UTC.',
     },
     {
       reason: 'invalid_severity_for_version',
@@ -304,7 +228,36 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
       recovery:
-        'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
+        'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    },
+    {
+      reason: 'nvd_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD answered with HTTP 5xx, or the request or its response failed on the network, after the client retried.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery: 'NVD is failing or unreachable; wait a minute and retry the call.',
+    },
+    {
+      reason: 'nvd_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'An NVD request outlived its timeout, or the call ran out of its 55-second deadline.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery:
+        'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    },
+    {
+      reason: 'nvd_invalid_api_key',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: "NVD refused the server's configured NVD_API_KEY.",
+      retryable: false,
+      /** Raised by the HTTP client, below this handler, carrying this same hint. */
+      thrownBy: 'service',
+      recovery:
+        "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
     },
   ],
 
@@ -318,6 +271,8 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       'pubEndDate',
       'lastModStartDate',
       'lastModEndDate',
+      'kevStartDate',
+      'kevEndDate',
     ] as const) {
       const value = input[field];
       if (value === undefined) continue;
@@ -350,71 +305,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       );
     }
 
-    // Validate mutual exclusivity
-    if (input.pubDays !== undefined && (input.pubStartDate || input.pubEndDate)) {
-      throw ctx.fail(
-        'mutually_exclusive_params',
-        'pubDays and pubStartDate/pubEndDate are mutually exclusive.',
-      );
-    }
-    if (input.lastModDays !== undefined && (input.lastModStartDate || input.lastModEndDate)) {
-      throw ctx.fail(
-        'mutually_exclusive_params',
-        'lastModDays and lastModStartDate/lastModEndDate are mutually exclusive.',
-        {
-          recovery: {
-            hint: 'Use either the convenience shorthand (lastModDays) or the explicit date range (lastModStartDate + lastModEndDate), not both.',
-          },
-        },
-      );
-    }
-
-    // Validate co-requirement: start and end must be provided together.
-    if (input.pubStartDate && !input.pubEndDate) {
-      throw ctx.fail('missing_date_pair', 'pubStartDate requires pubEndDate.');
-    }
-    if (input.pubEndDate && !input.pubStartDate) {
-      throw ctx.fail('missing_date_pair', 'pubEndDate requires pubStartDate.');
-    }
-    if (input.lastModStartDate && !input.lastModEndDate) {
-      throw ctx.fail('missing_date_pair', 'lastModStartDate requires lastModEndDate.');
-    }
-    if (input.lastModEndDate && !input.lastModStartDate) {
-      throw ctx.fail('missing_date_pair', 'lastModEndDate requires lastModStartDate.');
-    }
-
-    const datesClamped: Array<{ param: string; original: number; clamped: number }> = [];
-    let pubStartDate: string | undefined = input.pubStartDate;
-    let pubEndDate: string | undefined = input.pubEndDate;
-    let lastModStartDate: string | undefined = input.lastModStartDate;
-    let lastModEndDate: string | undefined = input.lastModEndDate;
-    // Track whether dates came from convenience params — those are always within range.
-    let pubDatesFromConvenience = false;
-    let lastModDatesFromConvenience = false;
-
-    // Expand pubDays convenience param
-    if (input.pubDays !== undefined) {
-      let days = input.pubDays;
-      if (days > MAX_DATE_RANGE_DAYS) {
-        datesClamped.push({ param: 'pubDays', original: days, clamped: MAX_DATE_RANGE_DAYS });
-        days = MAX_DATE_RANGE_DAYS;
-      }
-      pubStartDate = daysAgo(days);
-      pubEndDate = nowIso();
-      pubDatesFromConvenience = true;
-    }
-
-    // Expand lastModDays convenience param
-    if (input.lastModDays !== undefined) {
-      let days = input.lastModDays;
-      if (days > MAX_DATE_RANGE_DAYS) {
-        datesClamped.push({ param: 'lastModDays', original: days, clamped: MAX_DATE_RANGE_DAYS });
-        days = MAX_DATE_RANGE_DAYS;
-      }
-      lastModStartDate = daysAgo(days);
-      lastModEndDate = nowIso();
-      lastModDatesFromConvenience = true;
-    }
+    const windows = resolveDateWindows(input, Date.now());
 
     // Validate severity cross-field constraint: CVSS v2 has no CRITICAL tier.
     if (input.severity === 'CRITICAL' && input.severityVersion === 'v2') {
@@ -422,68 +313,6 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         'invalid_severity_for_version',
         'CVSS v2 has no CRITICAL severity tier. Valid values for severityVersion="v2" are LOW, MEDIUM, HIGH.',
       );
-    }
-
-    // Validate explicit date range spans — skip when dates came from convenience params
-    // (those are always within the max range after clamping).
-    if (!pubDatesFromConvenience && pubStartDate && pubEndDate) {
-      const start = new Date(pubStartDate);
-      const end = new Date(pubEndDate);
-      if (Number.isNaN(start.getTime())) {
-        throw ctx.fail(
-          'invalid_date_format',
-          `Invalid date for pubStartDate: "${pubStartDate}". Expected ISO 8601 format.`,
-        );
-      }
-      if (Number.isNaN(end.getTime())) {
-        throw ctx.fail(
-          'invalid_date_format',
-          `Invalid date for pubEndDate: "${pubEndDate}". Expected ISO 8601 format.`,
-        );
-      }
-      const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
-      if (days < 0) {
-        throw ctx.fail(
-          'date_range_inverted',
-          'pubEndDate is before pubStartDate — the date range is inverted.',
-        );
-      }
-      if (days > MAX_DATE_RANGE_DAYS) {
-        throw ctx.fail(
-          'date_range_exceeds_max',
-          `Publication date range spans ${Math.ceil(days)} days; maximum is 120.`,
-        );
-      }
-    }
-
-    if (!lastModDatesFromConvenience && lastModStartDate && lastModEndDate) {
-      const start = new Date(lastModStartDate);
-      const end = new Date(lastModEndDate);
-      if (Number.isNaN(start.getTime())) {
-        throw ctx.fail(
-          'invalid_date_format',
-          `Invalid date for lastModStartDate: "${lastModStartDate}". Expected ISO 8601 format.`,
-        );
-      }
-      if (Number.isNaN(end.getTime())) {
-        throw ctx.fail(
-          'invalid_date_format',
-          `Invalid date for lastModEndDate: "${lastModEndDate}". Expected ISO 8601 format.`,
-        );
-      }
-      const days = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
-      if (days < 0) {
-        throw ctx.fail(
-          'date_range_inverted',
-          'lastModEndDate is before lastModStartDate — the date range is inverted.',
-        );
-      }
-      if (days > MAX_DATE_RANGE_DAYS) {
-        throw ctx.fail(
-          'date_range_exceeds_max',
-          `Last-modified date range spans ${Math.ceil(days)} days; maximum is 120.`,
-        );
-      }
     }
 
     const service = getNvdCveService();
@@ -496,10 +325,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
         ...(input.severity && { severityParam: input.severity }),
         severityVersion: input.severityVersion,
         ...(input.cweId && { cweId: input.cweId }),
-        ...(pubStartDate && { pubStartDate }),
-        ...(pubEndDate && { pubEndDate }),
-        ...(lastModStartDate && { lastModStartDate }),
-        ...(lastModEndDate && { lastModEndDate }),
+        ...windows.dates,
         kevOnly: input.kevOnly,
         noRejected: input.noRejected,
         limit: clamped.limit,
@@ -517,10 +343,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       ...(input.exactPhrase && { exactPhrase: true }),
       ...(input.severity && { severity: input.severity, severityVersion: input.severityVersion }),
       ...(input.cweId && { cweId: input.cweId }),
-      ...(pubStartDate && { pubStartDate }),
-      ...(pubEndDate && { pubEndDate }),
-      ...(lastModStartDate && { lastModStartDate }),
-      ...(lastModEndDate && { lastModEndDate }),
+      ...windows.dates,
       ...(input.kevOnly && { kevOnly: true }),
       ...(input.noRejected === false && { noRejected: false }),
     };
@@ -528,7 +351,7 @@ export const nvdSearchCves = tool('nvd_search_cves', {
     ctx.enrich({
       returned: result.returned,
       offset: result.offset,
-      ...(datesClamped.length > 0 && { datesClamped }),
+      ...(windows.datesClamped.length > 0 && { datesClamped: windows.datesClamped }),
       ...(Object.keys(filtersApplied).length > 0 && { filtersApplied }),
     });
     ctx.enrich.total(result.totalResults);
@@ -556,12 +379,16 @@ export const nvdSearchCves = tool('nvd_search_cves', {
       /**
        * Offset is zero-based, so `offset + returned` is the index of the first record this page
        * did not carry — the next page's own offset, not one past it. Naming anything higher skips
-       * a record.
+       * a record. A shorthand window would move by the next call, so the first page's notice also
+       * names the echoed dates that hold it still.
        */
+      const replay = windowReplayClause(windows.shorthands, input.offset);
       notices.push(
-        `Results truncated — ${result.totalResults} CVEs match; set offset to ${result.offset + result.returned} for the next page.`,
+        `Results truncated — ${result.totalResults} CVEs match; set offset to ${result.offset + result.returned} for the next page${replay ? ` and ${replay}` : ''}.`,
       );
     }
+    const reexpanded = windowReexpandedNotice(windows.shorthands, input.offset);
+    if (reexpanded) notices.push(reexpanded);
 
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     return { cves: result.cves };

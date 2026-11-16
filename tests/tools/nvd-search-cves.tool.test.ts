@@ -5,12 +5,14 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCves } from '@/mcp-server/tools/definitions/nvd-search-cves.tool.js';
 import * as nvdCveServiceModule from '@/services/nvd-cve/nvd-cve-service.js';
 import type { BriefCveRecord } from '@/services/nvd-cve/types.js';
 import { nvdRequestRejected } from '@/services/nvd-http/nvd-http-client.js';
 import { at } from '../support/at.js';
+import { inZone } from '../support/time-zone.js';
 
 const BRIEF_CVE: BriefCveRecord = {
   cveId: 'CVE-2021-44228',
@@ -236,7 +238,7 @@ describe('nvdSearchCves', () => {
     });
   });
 
-  it('daysAgo/nowIso produce parseable ISO 8601 dates (forwarded to service)', async () => {
+  it('expands pubDays to parseable ISO 8601 dates (forwarded to service)', async () => {
     // Capture what date strings get passed to the service when pubDays is used
     mockService.searchCves.mockResolvedValue(makeSearchResult());
     const ctx = createMockContext({ errors: nvdSearchCves.errors });
@@ -549,22 +551,42 @@ describe('nvdSearchCves — effective filter context', () => {
   });
 
   it.each([
-    ['nvd_invalid_response', JsonRpcErrorCode.ServiceUnavailable, 'Try again later'],
-    ['nvd_request_blocked', JsonRpcErrorCode.Forbidden, 'Rephrase'],
-  ] as const)('renders recovery for %s at the tool boundary', async (reason, code, hint) => {
-    mockService.searchCves.mockRejectedValue(
-      new McpError(code, 'NVD request failed.', { reason, retryable: false }),
-    );
-    const result = await runToolContract(nvdSearchCves, { keyword: 'log4j' });
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      error: {
-        code,
-        data: { reason, retryable: false, recovery: { hint: expect.stringContaining(hint) } },
-      },
-    });
-    expect(resultText(result)).toContain(hint);
-  });
+    ['nvd_invalid_response', JsonRpcErrorCode.ServiceUnavailable, false, 'Try again later'],
+    ['nvd_request_blocked', JsonRpcErrorCode.Forbidden, false, 'Rephrase'],
+    ['rate_limited', JsonRpcErrorCode.RateLimited, true, 'a server operator can set NVD_API_KEY'],
+    ['nvd_unavailable', JsonRpcErrorCode.ServiceUnavailable, true, 'wait a minute and retry'],
+    [
+      'nvd_timeout',
+      JsonRpcErrorCode.Timeout,
+      true,
+      'A server operator can raise NVD_REQUEST_TIMEOUT_MS',
+    ],
+    [
+      'nvd_invalid_api_key',
+      JsonRpcErrorCode.ConfigurationError,
+      false,
+      'no NVD call can succeed until a server operator fixes it',
+    ],
+  ] as const)(
+    'renders recovery for %s at the tool boundary',
+    async (reason, code, retryable, hint) => {
+      mockService.searchCves.mockRejectedValue(
+        new McpError(code, 'NVD request failed.', { reason, retryable }),
+      );
+      const result = await runToolContract(nvdSearchCves, { keyword: 'log4j' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code,
+          data: { reason, retryable, recovery: { hint: expect.stringContaining(hint) } },
+        },
+      });
+      expect(resultText(result)).toContain(hint);
+      expect(nvdSearchCves.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+        retryable,
+      });
+    },
+  );
 
   it('keeps an omitted filter absent without an ignored-field notice', async () => {
     const result = await runToolContract(nvdSearchCves, {});
@@ -592,6 +614,17 @@ describe('nvdSearchCves — effective filter context', () => {
     );
     for (const [key, value] of Object.entries(dates))
       expect(resultText(result)).toContain(`${key}=${value}`);
+  });
+
+  it('escapes a markdown-bearing keyword in the filters trailer, keeping it raw in structuredContent', async () => {
+    const keyword = '**x** ](javascript:0)\n## CVE-2099-00000';
+    const result = await runToolContract(nvdSearchCves, { keyword });
+
+    expect(result.structuredContent).toHaveProperty('filtersApplied', { keyword });
+    expect(resultText(result)).toContain(
+      `**Filters applied:** keyword=${escapeMarkdownInline(keyword)}`,
+    );
+    expect(resultText(result)).not.toContain(keyword);
   });
 
   it('echoes expanded and clamped windows and permits their exact replay', async () => {
@@ -623,6 +656,8 @@ describe('nvdSearchCves — effective filter context', () => {
     'pubEndDate',
     'lastModStartDate',
     'lastModEndDate',
+    'kevStartDate',
+    'kevEndDate',
   ] as const)('discloses blank %s without forwarding it', async (field) => {
     for (const value of ['', ' \t\n ']) {
       mockService.searchCves.mockClear();
@@ -687,8 +722,12 @@ describe('nvdSearchCves — effective filter context', () => {
   it.each([
     [{ cweId: '79' }, 'Invalid cweId parameter.'],
     [{ cweId: 'cwe-79' }, 'Invalid cweId parameter.'],
+    /**
+     * A date-only value fails locally, so this case uses minutes with an offset, which passes the
+     * local grammar; a date rejection NVD still raises has to carry date guidance.
+     */
     [
-      { pubStartDate: '2024-01-01', pubEndDate: '2024-01-02T00:00:00.000Z' },
+      { pubStartDate: '2024-01-01T00:00-05:00', pubEndDate: '2024-01-02T00:00:00.000Z' },
       'Invalid ISO 8601 date/time format, see documentation.',
     ],
   ])('supplies recovery for NVD-rejected CWE and date forms', async (input, detail) => {
@@ -863,5 +902,366 @@ describe('nvdSearchCves — next-page notice (issue #36)', () => {
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain('past the end');
     expect(notice).not.toContain('truncated');
+  });
+});
+
+/** A page of `returned` rows at `offset` out of `totalResults`. */
+function pageOf(offset: number, returned: number, totalResults: number) {
+  return {
+    cves: Array.from({ length: returned }, (_, i) => ({
+      ...BRIEF_CVE,
+      cveId: `CVE-2026-${String(120189 + offset + i)}`,
+    })),
+    totalResults,
+    returned,
+    offset,
+  };
+}
+
+/**
+ * The date-window mechanism (grammar, pairs, exclusion, span, clamping) is tabled once in
+ * tests/tools/date-windows.test.ts; these cases prove its wiring through this tool: the KEV axis
+ * (#66), the moving-window notices (#67), the date grammar (#71), and the DST-exact shorthand.
+ */
+describe('nvdSearchCves — date windows (issues #66, #67, #71)', () => {
+  const mockService = { searchCves: vi.fn() };
+
+  beforeEach(() => {
+    vi.spyOn(nvdCveServiceModule, 'getNvdCveService').mockReturnValue(mockService as never);
+    mockService.searchCves.mockReset();
+    mockService.searchCves.mockResolvedValue(makeSearchResult());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-15T20:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function sentParams(call = 0): Record<string, unknown> {
+    return mockService.searchCves.mock.calls[call]?.[0] as Record<string, unknown>;
+  }
+
+  describe('KEV-addition window (#66)', () => {
+    it('sends kevDays as exactly N × 24 h ending at call time and echoes it on both surfaces', async () => {
+      const window = {
+        kevStartDate: '2026-11-08T20:00:00.000Z',
+        kevEndDate: '2026-11-15T20:00:00.000Z',
+      };
+      const result = await runToolContract(nvdSearchCves, { kevDays: 7, severity: 'CRITICAL' });
+
+      expect(sentParams()).toMatchObject(window);
+      expect(result.structuredContent).toHaveProperty('filtersApplied', {
+        ...window,
+        severity: 'CRITICAL',
+        severityVersion: 'v3',
+      });
+      expect(result.structuredContent).not.toHaveProperty('datesClamped');
+      for (const [key, value] of Object.entries(window))
+        expect(resultText(result)).toContain(`${key}=${value}`);
+    });
+
+    it('clamps kevDays over 120 to 120 days and reports it on both surfaces', async () => {
+      const result = await runToolContract(nvdSearchCves, { kevDays: 200 });
+
+      expect(sentParams()).toMatchObject({
+        kevStartDate: '2026-07-18T20:00:00.000Z',
+        kevEndDate: '2026-11-15T20:00:00.000Z',
+      });
+      expect(result.structuredContent).toHaveProperty('datesClamped', [
+        { param: 'kevDays', original: 200, clamped: 120 },
+      ]);
+      expect(resultText(result)).toContain(
+        'kevDays value 200 exceeded the 120-day maximum and was clamped to 120.',
+      );
+    });
+
+    it('sends an explicit KEV pair unchanged, including one exactly 120 days long', async () => {
+      const window = {
+        kevStartDate: '2026-07-18T00:00:00.000Z',
+        kevEndDate: '2026-11-15T00:00:00.000Z',
+      };
+      const result = await runToolContract(nvdSearchCves, window);
+
+      expect(result.isError).not.toBe(true);
+      expect(sentParams()).toMatchObject(window);
+      expect(result.structuredContent).toHaveProperty('filtersApplied', window);
+    });
+
+    it('trims a KEV pair before validating, sending, and echoing it', async () => {
+      const result = await runToolContract(nvdSearchCves, {
+        kevStartDate: ' 2026-10-01T00:00:00.000Z\t',
+        kevEndDate: '\n2026-11-15T00:00:00.000Z ',
+      });
+      const window = {
+        kevStartDate: '2026-10-01T00:00:00.000Z',
+        kevEndDate: '2026-11-15T00:00:00.000Z',
+      };
+
+      expect(sentParams()).toMatchObject(window);
+      expect(result.structuredContent).toHaveProperty('filtersApplied', window);
+    });
+
+    it('accepts kevOnly beside a KEV window, sending and echoing both', async () => {
+      const result = await runToolContract(nvdSearchCves, { kevOnly: true, kevDays: 7 });
+
+      expect(sentParams()).toMatchObject({
+        kevOnly: true,
+        kevStartDate: '2026-11-08T20:00:00.000Z',
+        kevEndDate: '2026-11-15T20:00:00.000Z',
+      });
+      expect(result.structuredContent).toHaveProperty('filtersApplied', {
+        kevOnly: true,
+        kevStartDate: '2026-11-08T20:00:00.000Z',
+        kevEndDate: '2026-11-15T20:00:00.000Z',
+      });
+    });
+
+    it('replays an echoed kevDays window as the identical request', async () => {
+      const first = await runToolContract(nvdSearchCves, { kevDays: 7 });
+      vi.advanceTimersByTime(17_200);
+      const echoed = (first.structuredContent as { filtersApplied: Record<string, string> })
+        .filtersApplied;
+      await runToolContract(nvdSearchCves, echoed);
+
+      expect(sentParams(0)).toHaveProperty('kevStartDate', '2026-11-08T20:00:00.000Z');
+      expect(sentParams(1)).toEqual(sentParams(0));
+    });
+
+    it.each([
+      [{ kevStartDate: '2026-10-01T00:00:00.000Z' }, 'missing_date_pair', 'Provide both'],
+      [
+        { kevDays: 7, kevEndDate: '2026-11-15T00:00:00.000Z' },
+        'mutually_exclusive_params',
+        'convenience shorthand (kevDays) or the explicit date range (kevStartDate + kevEndDate)',
+      ],
+      [
+        { kevStartDate: '2026-11-15T00:00:00.000Z', kevEndDate: '2026-10-01T00:00:00.000Z' },
+        'date_range_inverted',
+        'end date is after the start date',
+      ],
+      [
+        { kevStartDate: '2026-07-18T00:00:00.000Z', kevEndDate: '2026-11-15T00:00:01.000Z' },
+        'date_range_exceeds_max',
+        '120 days or fewer',
+      ],
+      [
+        { kevStartDate: '2026-11-01', kevEndDate: '2026-11-02T00:00:00.000Z' },
+        'invalid_date_format',
+        'YYYY-MM-DDThh:mm',
+      ],
+    ] as const)(
+      'fails %o as %s before any request, with recovery on both surfaces',
+      async (input, reason, hint) => {
+        const result = await runToolContract(nvdSearchCves, input);
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: { reason, recovery: { hint: expect.stringContaining(hint) } },
+          },
+        });
+        expect(resultText(result)).toContain(hint);
+        expect(mockService.searchCves).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('shorthand expansion across a DST change (fold-in)', () => {
+    it.each(['America/Los_Angeles', 'Europe/Berlin'])(
+      'sends pubDays: 120 as exactly 120 × 24 h under %s',
+      async (zone) => {
+        await inZone(zone, async () => {
+          const result = await runToolContract(nvdSearchCves, { pubDays: 120 });
+
+          expect(result.isError).not.toBe(true);
+          expect(sentParams()).toMatchObject({
+            pubStartDate: '2026-07-18T20:00:00.000Z',
+            pubEndDate: '2026-11-15T20:00:00.000Z',
+          });
+        });
+      },
+    );
+  });
+
+  describe('moving-window paging notices (#67)', () => {
+    beforeEach(() => {
+      vi.setSystemTime(new Date('2026-11-08T01:17:00.000Z'));
+    });
+
+    const REPLAY =
+      'Results truncated — 3081 CVEs match; set offset to 2 for the next page and send pubStartDate and pubEndDate from filtersApplied instead of pubDays, so the next page reads the same window.';
+    const REEXPANDED =
+      'pubDays was expanded at call time, so the window in filtersApplied can differ from the one earlier pages read; to page one fixed window, send the dates echoed on the first page instead of pubDays.';
+
+    async function noticeFor(input: Record<string, unknown>, page: ReturnType<typeof pageOf>) {
+      mockService.searchCves.mockResolvedValue(page);
+      const result = await runToolContract(nvdSearchCves, input);
+      return { notice: (result.structuredContent as { notice?: string }).notice, result };
+    }
+
+    it('names the next offset and the filtersApplied keys to send in place of a shorthand', async () => {
+      const { notice, result } = await noticeFor({ pubDays: 7, limit: 2 }, pageOf(0, 2, 3081));
+
+      expect(notice).toBe(REPLAY);
+      expect(resultText(result)).toContain(REPLAY);
+      expect(result.structuredContent).toHaveProperty('filtersApplied', {
+        pubStartDate: '2026-11-01T01:17:00.000Z',
+        pubEndDate: '2026-11-08T01:17:00.000Z',
+      });
+    });
+
+    it('keeps the plain next-page notice for an explicit pair', async () => {
+      const { notice } = await noticeFor(
+        {
+          pubStartDate: '2026-11-01T01:17:00.000Z',
+          pubEndDate: '2026-11-08T01:17:00.000Z',
+          limit: 2,
+        },
+        pageOf(0, 2, 3081),
+      );
+
+      expect(notice).toBe(
+        'Results truncated — 3081 CVEs match; set offset to 2 for the next page.',
+      );
+    });
+
+    it('adds no re-expansion notice to an explicit pair past offset 0', async () => {
+      const { notice } = await noticeFor(
+        {
+          pubStartDate: '2026-11-01T01:17:00.000Z',
+          pubEndDate: '2026-11-08T01:17:00.000Z',
+          limit: 2,
+          offset: 2,
+        },
+        pageOf(2, 2, 3081),
+      );
+
+      expect(notice).toBe(
+        'Results truncated — 3081 CVEs match; set offset to 4 for the next page.',
+      );
+    });
+
+    it('adds the re-expansion notice beside the page notice when a shorthand pages past 0', async () => {
+      const { notice, result } = await noticeFor(
+        { pubDays: 7, limit: 2, offset: 2 },
+        pageOf(2, 2, 3081),
+      );
+
+      // filtersApplied holds this call's re-expanded window here, so only the first page's dates hold the window still.
+      expect(notice).toBe(
+        `Results truncated — 3081 CVEs match; set offset to 4 for the next page. ${REEXPANDED}`,
+      );
+      expect(resultText(result)).toContain(REEXPANDED);
+    });
+
+    it('adds the re-expansion notice alone on a shorthand last page past offset 0', async () => {
+      const { notice } = await noticeFor(
+        { pubDays: 7, limit: 2, offset: 3079 },
+        pageOf(3079, 2, 3081),
+      );
+
+      expect(notice).toBe(REEXPANDED);
+    });
+
+    it('adds no notice to a complete first page or the empty page of a shorthand', async () => {
+      expect((await noticeFor({ pubDays: 7 }, pageOf(0, 2, 2))).notice).toBeUndefined();
+      expect((await noticeFor({ pubDays: 7 }, pageOf(0, 0, 0))).notice).toBe(
+        'No CVEs matched the search criteria. Try broadening the keyword or date range.',
+      );
+    });
+
+    it('names every shorthand window and its keys when several set the page', async () => {
+      const { notice } = await noticeFor(
+        { pubDays: 7, kevDays: 30, limit: 2, offset: 2 },
+        pageOf(2, 2, 40),
+      );
+
+      expect(notice).toBe(
+        'Results truncated — 40 CVEs match; set offset to 4 for the next page. pubDays and kevDays were expanded at call time, so the window in filtersApplied can differ from the one earlier pages read; to page one fixed window, send the dates echoed on the first page instead of pubDays and kevDays.',
+      );
+    });
+
+    it('replays the first page window at the named offset, where the shorthand would move', async () => {
+      mockService.searchCves.mockResolvedValue(pageOf(0, 2, 3081));
+      const first = await runToolContract(nvdSearchCves, { pubDays: 7, limit: 2 });
+      const echoed = (first.structuredContent as { filtersApplied: Record<string, string> })
+        .filtersApplied;
+      vi.advanceTimersByTime(17_200);
+
+      await runToolContract(nvdSearchCves, { ...echoed, limit: 2, offset: 2 });
+      await runToolContract(nvdSearchCves, { pubDays: 7, limit: 2, offset: 2 });
+
+      const window = (call: number) => ({
+        pubStartDate: sentParams(call).pubStartDate,
+        pubEndDate: sentParams(call).pubEndDate,
+      });
+      expect(window(1)).toEqual(window(0));
+      expect(sentParams(1).offset).toBe(2);
+      // The shorthand re-expanded 17.2 s later reads a window 17 s on (milliseconds are zeroed).
+      expect(window(2)).toEqual({
+        pubStartDate: '2026-11-01T01:17:17.000Z',
+        pubEndDate: '2026-11-08T01:17:17.000Z',
+      });
+    });
+  });
+
+  describe('date grammar (#71)', () => {
+    it('fails a date-only value as invalid_date_format before any request, naming the accepted form', async () => {
+      const result = await runToolContract(nvdSearchCves, {
+        pubStartDate: '2026-11-01',
+        pubEndDate: '2026-11-02',
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining(
+            'Invalid date for pubStartDate: "2026-11-01". Expected YYYY-MM-DDThh:mm',
+          ),
+          data: { reason: 'invalid_date_format' },
+        },
+      });
+      expect(resultText(result)).toContain('Expected YYYY-MM-DDThh:mm');
+      expect(mockService.searchCves).not.toHaveBeenCalled();
+    });
+
+    it('sends an accepted form NVD answers to the service unchanged', async () => {
+      const window = {
+        lastModStartDate: '2026-11-01t00:00:00z',
+        lastModEndDate: '+002026-11-02T00:00',
+      };
+      const result = await runToolContract(nvdSearchCves, window);
+
+      expect(result.isError).not.toBe(true);
+      expect(sentParams()).toMatchObject(window);
+      expect(result.structuredContent).toHaveProperty('filtersApplied', window);
+    });
+
+    it.each([
+      // 120 days in UTC; read in Pacific time the window grows by the hour DST gives back.
+      [{ pubStartDate: '2026-07-18T00:00:00', pubEndDate: '2026-11-15T00:00:00' }, undefined],
+      // 120 days + 30 min in UTC; read in Pacific time it shrinks below 120 days.
+      [
+        { pubStartDate: '2026-03-01T00:00:00', pubEndDate: '2026-06-29T00:30:00' },
+        'date_range_exceeds_max',
+      ],
+    ] as const)(
+      'measures an offset-less window across a DST change in UTC (%o)',
+      async (window, reason) => {
+        await inZone('America/Los_Angeles', async () => {
+          const result = await runToolContract(nvdSearchCves, window);
+
+          if (reason) {
+            expect(result.structuredContent).toMatchObject({ error: { data: { reason } } });
+            expect(mockService.searchCves).not.toHaveBeenCalled();
+          } else {
+            expect(result.isError).not.toBe(true);
+            expect(sentParams()).toMatchObject(window);
+          }
+        });
+      },
+    );
   });
 });
