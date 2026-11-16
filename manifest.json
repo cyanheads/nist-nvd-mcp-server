@@ -38,7 +38,7 @@
     "NVD_CLAMP_LIMITS": {
       "title": "Clamp read limits",
       "type": "boolean",
-      "description": "Clamp oversized requests to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False rejects oversized input.",
+      "description": "Clamp oversized requests to 2000 CVEs/events, 10000 CPEs, or 100 distinct CVE IDs. False rejects oversized input.",
       "required": false,
       "default": true
     },

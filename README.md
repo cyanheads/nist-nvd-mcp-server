@@ -35,10 +35,10 @@ CVE and CPE data from the NIST National Vulnerability Database. Search and audit
 
 | Tool | Description |
 |:-----|:------------|
-| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, date range, or CISA KEV status. |
-| `nvd_get_cve` | Fetch one or more CVEs by ID — full CVSS scores, CWE, CPE configs, KEV fields, and references. |
+| `nvd_search_cves` | Search CVEs by keyword, severity, CWE, publication or last-modified date, CISA KEV status, or the date CISA added a CVE to KEV. |
+| `nvd_get_cve` | Fetch one or more CVEs by ID — full CVSS scores with their suppliers, CWE, CPE configs, CNA/ADP affected products, KEV fields, and references. |
 | `nvd_search_cpes` | Search the NVD CPE dictionary by product keyword or partial match string. |
-| `nvd_audit_cpe` | Find all CVEs affecting a specific product version by CPE name or virtual match string. |
+| `nvd_audit_cpe` | Find all CVEs affecting a specific product version by CPE name or virtual match string, optionally narrowed server-side by KEV status, severity band, or date window. |
 | `nvd_get_cve_history` | Retrieve the change history for a CVE — score revisions, status transitions, and reference additions. |
 
 ### Resources
@@ -52,13 +52,15 @@ CVE resource data is also reachable via `nvd_get_cve`. The published guide is al
 
 ## Capability reference
 
-Oversized read limits clamp by default: 2000 for CVE search, audit, and history; 10000 for CPE search; 100 IDs for batch lookup. Clamped calls report `requestedLimit`, `effectiveLimit`, and a notice on both output surfaces. Batch lookup validates every supplied ID and lists normalized, deduplicated IDs beyond the processed prefix in `unprocessedIds`; `missingIds` covers queried IDs only. Set `NVD_CLAMP_LIMITS=false` before startup to restore advertised maxima and reject oversized requests. Zero, negative, and fractional limits remain invalid.
+Oversized read limits clamp by default: 2000 for CVE search, audit, and history; 10000 for CPE search; 100 distinct IDs for batch lookup. Clamped calls report `requestedLimit`, `effectiveLimit`, and a notice on both output surfaces. Batch lookup validates every supplied ID and lists normalized, deduplicated IDs beyond the processed prefix in `unprocessedIds`; `missingIds` covers queried IDs only. Set `NVD_CLAMP_LIMITS=false` before startup to restore advertised maxima and reject oversized requests (a `cveIds` string naming more than 100 distinct IDs fails `too_many_cve_ids`). Zero, negative, and fractional limits remain invalid.
 
 ### `nvd_search_cves` <sub>tool</sub>
 
 - Full-text keyword search (AND-semantics across words), or `exactPhrase: true` for an exact-phrase match — requires `keyword`
-- Filters: CVSS severity band (LOW/MEDIUM/HIGH/CRITICAL — CRITICAL requires `severityVersion: "v3"` or `"v4"`), CWE ID, CISA KEV status, `noRejected` (default true)
-- Date filters: `pubDays`/`lastModDays` convenience shorthands (auto-clamped to 120 days, clamping reported in the enrichment) or explicit ISO 8601 ranges (120-day max span, both ends required); the two forms per axis are mutually exclusive
+- Filters: CVSS severity band (LOW/MEDIUM/HIGH/CRITICAL — CRITICAL requires `severityVersion: "v3"` or `"v4"`), CWE ID, CISA KEV status (`kevOnly`), `noRejected` (default true)
+- Date filters on three axes — publication, last modification, and the date CISA added the CVE to KEV: `pubDays`/`lastModDays`/`kevDays` shorthands (exactly N × 24 hours up to call time, auto-clamped to 120 days, clamping reported in the enrichment) or explicit ranges (`pubStartDate`/`pubEndDate`, `lastModStartDate`/`lastModEndDate`, `kevStartDate`/`kevEndDate`; 120-day max span, both ends required); the two forms per axis are mutually exclusive. A KEV window returns only catalog members
+- Explicit dates are `YYYY-MM-DDThh:mm[:ss[.fraction]]` with an optional `Z` or `±hh:mm` offset; a value without an offset is read as UTC
+- A shorthand re-expands on every call: page with the dates echoed in `filtersApplied` (the next-page notice names them) so every page reads one window
 - Pagination via `limit` (up to 2000, default 20) and `offset`
 - Always returns brief summaries with a truncated description; call `nvd_get_cve` for full detail
 
@@ -66,12 +68,12 @@ Oversized read limits clamp by default: 2000 for CVE search, audit, and history;
 
 ### `nvd_get_cve` <sub>tool</sub>
 
-- Batch up to 100 CVE IDs per call
-- Full mode (default): CVSS scores across v2.0/v3.0/v3.1/v4.0, CWE weaknesses, CPE configurations, CISA KEV fields, references
+- Batch up to 100 distinct CVE IDs per call, as an array or one comma- or whitespace-separated string; IDs match regardless of case and a repeat is fetched once
+- Full mode (default): CVSS scores across v2.0/v3.0/v3.1/v4.0, each with the contributor that supplied it, CWE weaknesses, CPE configurations from NVD analysis, the affected products the CNA and any ADP state themselves (`affectedProducts`), the record's `sourceIdentifier` and `cveTags`, CISA KEV fields, references
 - `brief: true` returns trimmed rows (ID, status, top severity, KEV name, truncated description) — recommended for batches over 10
-- `includeReferences` and `includeConfigurations` default to true; set either false to omit that field from both output surfaces. `allLanguages: true` keeps every localized description instead of English-only
+- `includeReferences`, `includeConfigurations`, and `includeAffected` default to true; set any false to omit that field from both output surfaces. `allLanguages: true` keeps every localized description instead of English-only
 - `missingIds` enrichment field lists any requested IDs NVD didn't return
-- Both output surfaces carry every selected reference and CPE configuration; optional SSVC assessments appear when NVD supplies them
+- Both output surfaces carry every selected reference, CPE configuration, and affected-product statement; optional SSVC assessments appear when NVD supplies them
 
 ---
 
@@ -87,9 +89,11 @@ Oversized read limits clamp by default: 2000 for CVE search, audit, and history;
 ### `nvd_audit_cpe` <sub>tool</sub>
 
 - Two modes: exact `cpeName` (NVD auto-applies `isVulnerable`) or `virtualMatchString` with optional `versionStart`/`versionEnd` bounds (inclusive/exclusive)
-- Client-side `severityMin` filters the fetched page by the highest severity band across all CVSS metrics; the headline still follows the highest numerical score. It can only remove what `limit` retrieved
-- Returns full CVE records (CVSS scores, CWE, CPE configurations, KEV fields, references)
-- `includeReferences` and `includeConfigurations` default to true; false omits that field from both output surfaces. SSVC assessments remain optional
+- Server-side filters, same forms as `nvd_search_cves`: `kevOnly`, an exact severity band (`severity` + `severityVersion`, CRITICAL requires v3 or v4), and the publication, last-modified, and KEV-addition date windows (`pubDays`/`lastModDays`/`kevDays` shorthands or explicit pairs). `totalCount` and paging count within them; the echoed dates in `filtersApplied` page a shorthand window
+- Client-side `severityMin` filters the fetched page by the highest severity band across all CVSS metrics; the headline still follows the highest numerical score. It can only remove what `limit` retrieved, composes with `severity` as AND, and leaves `totalCount` unchanged
+- A zero total under a server-side filter is reported as no match for the filters, not a clean audit; only an unfiltered zero reads as "no known vulnerabilities"
+- Returns full CVE records (CVSS scores with their suppliers, CWE, CPE configurations, CNA/ADP affected products, KEV fields, references)
+- `includeReferences`, `includeConfigurations`, and `includeAffected` default to true; false omits that field from both output surfaces. SSVC assessments remain optional
 - Pagination via `limit` (up to 2000, default 20) and `offset` — page at a modest limit rather than raising it, since each result is a full record
 - `auditTarget` enrichment field echoes the CPE identifier used, so callers can verify the correct product was queried
 
@@ -100,13 +104,13 @@ Oversized read limits clamp by default: 2000 for CVE search, audit, and history;
 - Returns change events: CVSS revisions, status transitions, reference additions, CPE configuration updates
 - `order` picks the anchor end — `newest` (default) reads most-recent-first, `oldest` reads NVD's native order
 - Paginated via `limit` (up to 2000, default 20) and `offset`, counted from the end `order` anchors to
-- The history endpoint is markedly slower without an API key — set `NVD_API_KEY` and raise `NVD_REQUEST_TIMEOUT_MS`
+- The history endpoint is markedly slower than the others, especially on a server running without an API key (`NVD_API_KEY` raises the rate limit)
 
 ---
 
 ### `nvd://cve/{cveId}` <sub>resource</sub>
 
-- Full CVE record as `application/json` — same data as `nvd_get_cve` for one ID, with references and English-only descriptions
+- Full CVE record as `application/json` — same data as `nvd_get_cve` for one ID, with references, CNA/ADP `affectedProducts`, and English-only descriptions
 - `cveId` must match `CVE-YYYY-NNNNN`; a well-formed but unknown ID throws `cve_not_found`
 
 ## Features
@@ -120,6 +124,7 @@ NVD-specific:
 - A 403's `Retry-After` holds the whole queue until NVD's window resets; keyless, a 403 fails fast and names `NVD_API_KEY` rather than spending the 5-request budget on retries that cannot outlast a 30-second window
 - Deterministic rejections fail fast instead of consuming retries — NVD answers both a bad parameter and a refused API key with HTTP 404, separated only by a `message` header, so a refused key surfaces as a config fault naming `NVD_API_KEY` rather than as a malformed CVE ID
 - NVD block pages return a nonretryable blocked-request error; malformed JSON and response envelopes return an invalid-response error with recovery guidance
+- One 55-second deadline covers every NVD request a tool call makes — queue wait, attempts, backoff, and any `Retry-After` wait — so a slow or failing NVD ends the call with a retryable `nvd_timeout` or `nvd_unavailable` before MCP clients' 60-second default timeout; each attempt's timeout is capped by what remains of it
 - Request timeouts and caller cancellation remain active through response-body reads
 
 Agent-friendly output:
@@ -127,7 +132,7 @@ Agent-friendly output:
 - An `enrichment` block on every response, carried on both `structuredContent` and the rendered text — total results, returned count, page offset, the filters actually applied, and any date-clamping events, so agents can reason about what was really queried
 - `missingIds` in batch CVE lookups — a per-ID parity check instead of a silent partial result
 - CPE echo in audit responses — `cpeName` or `virtualMatchString` reflected back so callers can verify the correct product was audited
-- Empty-result notices that name the cause — an unmatched query, a severity threshold that emptied the page, an offset past the end of the result set, and a clean audit ("no known vulnerabilities") are told apart rather than all reading as errors or "nothing found"
+- Empty-result notices that name the cause — an unmatched query, a severity threshold that emptied the page, an offset past the end of the result set, a filtered audit with no match, and a clean audit ("no known vulnerabilities") are told apart rather than all reading as errors or "nothing found"
 
 ## Getting started
 
@@ -214,7 +219,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 NVD_API_KEY=... bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - Optional: [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) — free, raises rate limit from 5 req/30s to 50 req/30s.
 
 ### Installation
@@ -249,8 +254,8 @@ cp .env.example .env
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `NVD_API_KEY` | NVD API key. Without it, rate limit is 5 req/30s; with it, 50 req/30s. Get one free at [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key). | — |
-| `NVD_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. The history endpoint is slow without an API key — raise to 60000 if using `nvd_get_cve_history` without a key. | `10000` |
-| `NVD_CLAMP_LIMITS` | Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. `false` restores schema maxima and rejection. | `true` |
+| `NVD_REQUEST_TIMEOUT_MS` | Timeout for each NVD request attempt in milliseconds. Every attempt is also capped by what remains of the tool call's 55-second deadline, so raising it lengthens attempts, never the call. | `10000` |
+| `NVD_CLAMP_LIMITS` | Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 distinct CVE IDs. `false` restores schema maxima and rejection. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |

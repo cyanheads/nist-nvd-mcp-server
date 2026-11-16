@@ -23,7 +23,7 @@
       "environmentVariables": [
         {
           "name": "NVD_CLAMP_LIMITS",
-          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False restores rejection.",
+          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 distinct CVE IDs. False restores rejection.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -36,7 +36,7 @@
         },
         {
           "name": "NVD_REQUEST_TIMEOUT_MS",
-          "description": "Per-request timeout in milliseconds. Raise to 60000 when using nvd_get_cve_history without an API key.",
+          "description": "Timeout for each NVD request attempt in milliseconds. Every attempt is also capped by what remains of the tool call's 55s deadline, so raising it lengthens attempts, never the call.",
           "format": "string",
           "isRequired": false,
           "default": "10000"
@@ -62,7 +62,7 @@
       "environmentVariables": [
         {
           "name": "NVD_CLAMP_LIMITS",
-          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 CVE IDs. False restores rejection.",
+          "description": "Clamp oversized reads to 2000 CVEs/events, 10000 CPEs, or 100 distinct CVE IDs. False restores rejection.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -81,7 +81,7 @@
         },
         {
           "name": "NVD_REQUEST_TIMEOUT_MS",
-          "description": "Per-request timeout in milliseconds. Raise to 60000 when using nvd_get_cve_history without an API key.",
+          "description": "Timeout for each NVD request attempt in milliseconds. Every attempt is also capped by what remains of the tool call's 55s deadline, so raising it lengthens attempts, never the call.",
           "format": "string",
           "isRequired": false,
           "default": "10000"
