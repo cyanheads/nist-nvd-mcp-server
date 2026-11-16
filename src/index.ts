@@ -33,7 +33,7 @@ await createApp({
   prompts: [],
   skills: 'skills',
   instructions:
-    'Read-only access to the NIST National Vulnerability Database (NVD). Resolve an unknown product CPE with nvd_search_cpes before passing its exact CPEv2.3 name to nvd_audit_cpe; audit results cover NVD records for that target, subject to pagination and analysis completeness. Reuse CVE IDs from search or audit results with nvd_get_cve for current details and nvd_get_cve_history for revisions. Access works without a key at 5 requests per 30 seconds; NVD_API_KEY raises this to 50. Requests share a paced queue.',
+    'Read-only access to the NIST National Vulnerability Database (NVD). Resolve an unknown product CPE with nvd_search_cpes before passing its exact CPEv2.3 name to nvd_audit_cpe; audit results cover NVD records for that target, subject to pagination and analysis completeness. Reuse CVE IDs from search or audit results with nvd_get_cve for current details and nvd_get_cve_history for revisions. Access works without a key at 5 requests per 30 seconds; an NVD_API_KEY set by a server operator raises this to 50. Requests share a paced queue.',
 
   setup(core) {
     const cfg = getServerConfig();

@@ -10,7 +10,11 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { getNvdHttpClient, type NvdRequestBudget } from '../nvd-http/nvd-http-client.js';
+import {
+  getNvdHttpClient,
+  type NvdRequestBudget,
+  remainingCallMs,
+} from '../nvd-http/nvd-http-client.js';
 import { parseNvdResponse } from '../nvd-http/parse-nvd-response.js';
 import { rawNvdSourceResponseSchema } from './types.js';
 
@@ -25,7 +29,7 @@ export const passthroughSourceNames: SourceNameResolver = (identifier) => identi
 
 /**
  * `source/2.0` caps `resultsPerPage` at 1,000 and answers anything above it with the same HTTP
- * 404 it uses for a rejected parameter. The dictionary held 496 contributors as of this writing
+ * 404 it uses for a rejected parameter. The dictionary held 529 contributors on 2026-11-15
  * and has grown by 55–60 a year since 2024, so one page covers it well past the point where
  * paging would earn its complexity. A truncated page is logged, and the identifiers it left out
  * fall through as raw values like any other unknown.
@@ -44,20 +48,22 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FAILURE_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Effort spent on the dictionary, deliberately a fraction of what a CVE request gets. This runs
- * inside the calling tool, ahead of a record the caller already has in hand, and shares the one
- * pacing queue every NVD request passes through — so on the default budget an unreachable
- * `source/2.0` holds a CVE lookup for every attempt that budget allows, each with the full
- * request timeout and a backoff between them, with every queued CVE request stuck behind it. One
- * attempt on a short deadline reaches the raw-identifier fallback in seconds instead, and
- * {@link FAILURE_TTL_MS} keeps the next call from paying even that.
+ * Effort spent on the dictionary: one attempt, never a retry ladder. The load runs inside the
+ * calling tool, after a record the caller already has in hand, and shares the one pacing queue
+ * every NVD request passes through — so each retry would add a full attempt, and a backoff, to how
+ * long a failing `source/2.0` holds the call and every request queued behind it.
+ *
+ * The attempt is long enough for `source/2.0` at NVD's ordinary latency; a timeout shorter than
+ * that resolves nothing. The client caps it by what remains of the call's deadline, so the load
+ * never carries the call past it, and {@link FAILURE_TTL_MS} keeps the next calls from paying for
+ * a load that failed.
  */
-const SOURCE_REQUEST_BUDGET: NvdRequestBudget = { maxRetries: 0, timeoutMs: 3_000 };
+const SOURCE_REQUEST_BUDGET: NvdRequestBudget = { maxRetries: 0, timeoutMs: 20_000 };
 
 export class NvdSourceService {
   private names = new Map<string, string>();
   private expiresAt = 0;
-  private inFlight: Promise<Map<string, string>> | undefined;
+  private inFlight: Promise<void> | undefined;
 
   // biome-ignore lint/complexity/noUselessConstructor: preserves framework init-pattern signature
   constructor(_config: AppConfig, _storage: StorageService) {}
@@ -68,15 +74,20 @@ export class NvdSourceService {
    * The dictionary is one small document every record resolves against, and it turns over by a
    * handful of entries a year, so it is fetched on the cadence of {@link CACHE_TTL_MS} rather
    * than per CVE, per reference, or per call. Concurrent first callers share the single in-flight
-   * request: a burst of tool calls must not stampede the endpoint.
+   * request: a burst of tool calls must not stampede the endpoint. The call that opens the load
+   * spends its own deadline on it; the others wait on their own.
    */
   async getResolver(ctx: Context): Promise<SourceNameResolver> {
     if (ctx.signal.aborted) throw requestCancelled('NVD source lookup cancelled by caller.');
     if (Date.now() >= this.expiresAt) {
-      this.inFlight ??= this.load(ctx).finally(() => {
-        this.inFlight = undefined;
-      });
-      this.names = await this.inFlight;
+      if (this.inFlight) {
+        await this.waitOn(this.inFlight, ctx);
+      } else {
+        this.inFlight = this.load(ctx).finally(() => {
+          this.inFlight = undefined;
+        });
+        await this.inFlight;
+      }
     }
     if (ctx.signal.aborted) throw requestCancelled('NVD source lookup cancelled by caller.');
     const names = this.names;
@@ -84,11 +95,31 @@ export class NvdSourceService {
   }
 
   /**
-   * Load the dictionary, degrading to whatever is already cached when NVD cannot serve it. A CVE
-   * lookup must not start failing because a secondary metadata endpoint is down. Caller
-   * cancellation still propagates and leaves the cache cold.
+   * Wait on a load another call opened, on this call's own terms. The load runs on the opener's
+   * signal and deadline, so this call's cancellation or deadline ends only its own wait, and the
+   * opener's cancellation — the one way the load rejects — never fails this call: it proceeds
+   * with whatever names the cache holds once the wait ends.
    */
-  private async load(ctx: Context): Promise<Map<string, string>> {
+  private async waitOn(load: Promise<void>, ctx: Context): Promise<void> {
+    const { promise: deadlineOrAbort, resolve: stopWaiting } = Promise.withResolvers<void>();
+    const stop = () => stopWaiting();
+    const timer = setTimeout(stop, remainingCallMs(ctx));
+    ctx.signal.addEventListener('abort', stop, { once: true });
+    try {
+      await Promise.race([load.then(stop, stop), deadlineOrAbort]);
+    } finally {
+      clearTimeout(timer);
+      ctx.signal.removeEventListener('abort', stop);
+    }
+  }
+
+  /**
+   * Load the dictionary into the cache, degrading to whatever is already cached when NVD cannot
+   * serve it. A CVE lookup must not start failing because a secondary metadata endpoint is down.
+   * Caller cancellation still propagates, and it and a load cut short by the call's deadline both
+   * leave the cache as it was.
+   */
+  private async load(ctx: Context): Promise<void> {
     try {
       const response = parseNvdResponse(
         rawNvdSourceResponseSchema,
@@ -127,18 +158,18 @@ export class NvdSourceService {
         );
       }
 
+      this.names = names;
       this.expiresAt = Date.now() + CACHE_TTL_MS;
       ctx.log.debug('NVD source dictionary loaded', {
         sources: sources.length,
         identifiers: names.size,
       });
-      return names;
     } catch (err) {
       /**
-       * The caller that opened this load can also cancel it, and its walking away says nothing
-       * about whether NVD can serve the dictionary. Leaving the cache cold lets the next call try
-       * again, rather than committing every caller to raw identifiers for the whole failure
-       * window on the strength of an unrelated cancellation.
+       * The caller that opened this load can also cancel it, or run out its own call's time, and
+       * neither says anything about whether NVD can serve the dictionary. Leaving the cache as it
+       * was lets the next call try again, rather than committing every caller to raw identifiers
+       * for the whole failure window on the strength of one call's circumstances.
        */
       if (
         ctx.signal.aborted ||
@@ -148,12 +179,17 @@ export class NvdSourceService {
         ctx.log.debug('NVD source dictionary load cancelled with its caller — cache left cold');
         throw err;
       }
+      if (remainingCallMs(ctx) === 0) {
+        ctx.log.debug(
+          'NVD source dictionary load cut short by the call deadline — cache left as it was',
+        );
+        return;
+      }
       ctx.log.warning('NVD source dictionary unavailable — source identifiers pass through raw', {
         error: (err as Error).message,
       });
-      this.expiresAt = Date.now() + FAILURE_TTL_MS;
       // Keep any dictionary already in hand; a stale name beats an opaque identifier.
-      return this.names;
+      this.expiresAt = Date.now() + FAILURE_TTL_MS;
     }
   }
 }

@@ -1,7 +1,7 @@
 /**
  * @fileoverview HTTP client for the NIST NVD API 2.0 with rate-limit pacing.
  * Manages API key injection, queue-based pacing of every request attempt, retry with backoff,
- * and Retry-After header parsing.
+ * Retry-After header parsing, and the one deadline that bounds every request a tool call makes.
  * @module services/nvd-http/nvd-http-client
  */
 
@@ -9,6 +9,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   configurationError,
   forbidden,
+  JsonRpcErrorCode,
   McpError,
   rateLimited,
   requestCancelled,
@@ -36,11 +37,29 @@ const RATE_LIMIT_WITH_KEY = 50;
 const MAX_RETRIES_WITH_KEY = 3;
 const MAX_RETRIES_WITHOUT_KEY = 1;
 
+/**
+ * Every NVD request one tool call makes — its queue wait, attempts, backoff, and any Retry-After
+ * wait — settles within this many milliseconds of the call's start. MCP SDK clients give up on a
+ * request at 60 s by default, and a failure that lands after that never reaches the caller.
+ */
+const CALL_DEADLINE_MS = 55_000;
+
 /** `data.reason` on the error thrown when NVD rejects a request's parameters with HTTP 404. */
 const REQUEST_REJECTED_REASON = 'nvd_request_rejected';
 
 /** `data.reason` on the error thrown when NVD rejects the configured API key. */
 const INVALID_API_KEY_REASON = 'nvd_invalid_api_key';
+
+/** `data.reason` on an HTTP 5xx, or a request or body read that failed on the network. */
+const UNAVAILABLE_REASON = 'nvd_unavailable';
+
+/** `data.reason` on an attempt that outlived its timeout, or a call that ran out its deadline. */
+const TIMEOUT_REASON = 'nvd_timeout';
+
+/** The reason `withRetry` stamps on its own deadline expiry, which leaves as {@link TIMEOUT_REASON}. */
+const RETRY_DEADLINE_REASON = 'retry_deadline_exceeded';
+
+const CANCELLED_MESSAGE = 'NVD request cancelled by caller.';
 
 /**
  * NVD's own diagnosis for a 404, returned in a `message` response header rather than a body
@@ -88,6 +107,36 @@ export function isNvdRequestRejected(err: unknown): err is McpError {
 }
 
 /**
+ * Milliseconds left of the deadline the tool call behind `ctx` shares across every NVD request it
+ * makes, and anything it waits on; 0 once spent. It counts from the call's own start — the
+ * `timestamp` the framework stamps on the call's context — so a second request, or a wait on a
+ * load another call opened, gets only what the first left.
+ */
+export function remainingCallMs(ctx: Context): number {
+  return Math.max(0, Date.parse(ctx.timestamp) + CALL_DEADLINE_MS - Date.now());
+}
+
+/**
+ * The timeout a call ends in once its deadline is spent, whether before a request went out or
+ * during one. Retryable: a later call, with a fresh deadline, can succeed.
+ */
+function callDeadlineExceeded(
+  endpoint: string,
+  expiry?: { retryAttempts: unknown; cause: unknown },
+): McpError {
+  return timeout(
+    `The NVD request did not complete within the call's ${CALL_DEADLINE_MS / 1000}s deadline.`,
+    {
+      reason: TIMEOUT_REASON,
+      endpoint,
+      retryable: true,
+      ...(expiry && { retryAttempts: expiry.retryAttempts }),
+    },
+    expiry && { cause: expiry.cause },
+  );
+}
+
+/**
  * Per-call overrides of the client's default effort. A secondary lookup the caller can proceed
  * without must not spend the same retry and timeout budget as the record it decorates: on the
  * default budget an unreachable endpoint stretches the calling tool by the full product of
@@ -96,9 +145,15 @@ export function isNvdRequestRejected(err: unknown): err is McpError {
 export interface NvdRequestBudget {
   /** Retry attempts beyond the first. Defaults to the key-dependent budget. */
   maxRetries?: number;
-  /** Per-attempt timeout in milliseconds. Defaults to the configured request timeout. */
+  /**
+   * Per-attempt timeout in milliseconds. Defaults to the configured request timeout. Either way an
+   * attempt gets no more than what remains of its call's deadline.
+   */
   timeoutMs?: number;
 }
+
+/** One request attempt waiting in the pacing queue; calling it sends the request. */
+type QueuedAttempt = () => void;
 
 export class NvdHttpClient {
   private readonly apiKey: string | undefined;
@@ -106,7 +161,9 @@ export class NvdHttpClient {
   private lastRequestAt = 0;
   /** Epoch ms before which no request may be sent — set from a 403's Retry-After. */
   private backoffUntil = 0;
-  private queue: Array<() => void> = [];
+  private queue: QueuedAttempt[] = [];
+  /** The head attempt sleeping out its pacing delay, held so a withdrawal can cancel the sleep. */
+  private pacing: { attempt: QueuedAttempt; timer: ReturnType<typeof setTimeout> } | undefined;
   private draining = false;
 
   constructor(apiKey: string | undefined, timeoutMs: number) {
@@ -118,7 +175,8 @@ export class NvdHttpClient {
    * Fetch from the NVD API.
    *
    * Retry wraps the pacing queue rather than sitting inside it, so every attempt — the first
-   * try and each retry — waits its turn and counts against the rate budget.
+   * try and each retry — waits its turn and counts against the rate budget. The whole ladder,
+   * queue waits included, runs inside what remains of the call's deadline.
    */
   async get(
     endpoint: string,
@@ -126,28 +184,55 @@ export class NvdHttpClient {
     ctx: Context,
     budget?: NvdRequestBudget,
   ): Promise<unknown> {
+    const deadlineMs = remainingCallMs(ctx);
+    if (deadlineMs === 0) throw callDeadlineExceeded(endpoint);
     let attemptIndex = 0;
     const timeoutMs = budget?.timeoutMs ?? this.timeoutMs;
-    const text = await withRetry(
-      () => {
-        /**
-         * NVD's Retry-After is a full 30s window and the MCP client request deadline is 60s, so
-         * only one such wait fits inside a single call — spend it on the first attempt or not at
-         * all. Keyless has no budget to wait with; that arm fails fast and names NVD_API_KEY.
-         */
-        const mayWaitOutRateLimit = attemptIndex++ === 0 && !!this.apiKey;
-        return this.schedule(() =>
-          this.fetchOnce(endpoint, params, ctx, mayWaitOutRateLimit, timeoutMs),
-        );
-      },
-      {
-        operation: `NvdHttpClient.get:${endpoint}`,
-        maxRetries:
-          budget?.maxRetries ?? (this.apiKey ? MAX_RETRIES_WITH_KEY : MAX_RETRIES_WITHOUT_KEY),
-        baseDelayMs: 2_000,
-        signal: ctx.signal,
-      },
-    );
+    let text: string;
+    try {
+      text = await withRetry(
+        ({ signal }) => {
+          /**
+           * NVD's Retry-After is a full 30s window and the call's deadline is 55s, so only one
+           * such wait fits inside a single call — spend it on the first attempt or not at all.
+           * Keyless has no budget to wait with; that arm fails fast and names NVD_API_KEY.
+           */
+          const mayWaitOutRateLimit = attemptIndex++ === 0 && !!this.apiKey;
+          return this.schedule(
+            signal,
+            () =>
+              ctx.signal.aborted
+                ? requestCancelled(CANCELLED_MESSAGE)
+                : callDeadlineExceeded(endpoint),
+            () => this.fetchOnce(endpoint, params, ctx, signal, mayWaitOutRateLimit, timeoutMs),
+          );
+        },
+        {
+          operation: `NvdHttpClient.get:${endpoint}`,
+          maxRetries:
+            budget?.maxRetries ?? (this.apiKey ? MAX_RETRIES_WITH_KEY : MAX_RETRIES_WITHOUT_KEY),
+          baseDelayMs: 2_000,
+          signal: ctx.signal,
+          deadlineMs,
+        },
+      );
+    } catch (err) {
+      /**
+       * `withRetry` ends two ways on its own terms. A caller abort that lands mid-backoff arrives
+       * as the raw abort reason, and leaves as `RequestCancelled` like every other cancellation —
+       * which also outranks any failure the same moment produced. Its deadline expiry leaves as
+       * `nvd_timeout`, the reason each definition declares, with the endpoint it was spent on.
+       */
+      if (ctx.signal.aborted) {
+        throw err instanceof McpError && err.code === JsonRpcErrorCode.RequestCancelled
+          ? err
+          : requestCancelled(CANCELLED_MESSAGE, undefined, { cause: err });
+      }
+      if (err instanceof McpError && err.data?.reason === RETRY_DEADLINE_REASON) {
+        throw callDeadlineExceeded(endpoint, { retryAttempts: err.data.retryAttempts, cause: err });
+      }
+      throw err;
+    }
     try {
       const value: unknown = JSON.parse(text);
       return value;
@@ -160,21 +245,48 @@ export class NvdHttpClient {
     }
   }
 
-  /** Enqueue one request attempt, paced behind the inter-request gap and any active 403 backoff. */
-  private schedule<T>(run: () => Promise<T>): Promise<T> {
+  /**
+   * Enqueue one request attempt, paced behind the inter-request gap and any active 403 backoff.
+   *
+   * A queued attempt can wait out a whole rate-limit window. If `signal` aborts first — its caller
+   * gone, or its call's deadline spent — the attempt leaves the queue at once, sends nothing, and
+   * rejects with `ended()`, so a cancelled or expired call never lingers behind others' traffic.
+   */
+  private schedule<T>(
+    signal: AbortSignal,
+    ended: () => McpError,
+    run: () => Promise<T>,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queue.push(() => {
+      if (signal.aborted) {
+        reject(ended());
+        return;
+      }
+      const attempt: QueuedAttempt = () => {
+        signal.removeEventListener('abort', withdraw);
         run()
           .then(resolve, reject)
           .finally(() => this.drainNext());
-      });
+      };
+      const withdraw = () => {
+        if (this.pacing?.attempt === attempt) {
+          clearTimeout(this.pacing.timer);
+          this.pacing = undefined;
+          this.drainNext();
+        } else {
+          this.queue.splice(this.queue.indexOf(attempt), 1);
+        }
+        reject(ended());
+      };
+      signal.addEventListener('abort', withdraw, { once: true });
+      this.queue.push(attempt);
       if (!this.draining) this.drainNext();
     });
   }
 
   private drainNext(): void {
-    const task = this.queue.shift();
-    if (!task) {
+    const attempt = this.queue.shift();
+    if (!attempt) {
       this.draining = false;
       return;
     }
@@ -187,19 +299,37 @@ export class NvdHttpClient {
       this.backoffUntil - now,
     );
 
-    if (delay > 0) setTimeout(task, delay);
-    else task();
+    if (delay > 0) {
+      const timer = setTimeout(() => {
+        this.pacing = undefined;
+        attempt();
+      }, delay);
+      this.pacing = { attempt, timer };
+    } else {
+      attempt();
+    }
   }
 
+  /**
+   * Send one attempt. `signal` is the attempt's own from `withRetry`: it aborts on the caller's
+   * cancellation and on the call's deadline alike, and either one ends the request in flight.
+   */
   private async fetchOnce(
     endpoint: string,
     params: Record<string, string | number | boolean | undefined>,
     ctx: Context,
+    signal: AbortSignal,
     mayWaitOutRateLimit: boolean,
     timeoutMs: number,
   ): Promise<string> {
-    // A queued attempt can wait out a rate-limit window; don't spend a slot once the caller is gone.
-    if (ctx.signal.aborted) throw requestCancelled('NVD request cancelled by caller.');
+    /**
+     * An attempt whose turn comes on its call's deadline sends nothing. The turn can land on that
+     * instant before the deadline's own timer fires — when the attempt ahead ends on the same
+     * deadline — and a zero-length timeout still puts the request on the wire before it aborts.
+     */
+    const remainingMs = remainingCallMs(ctx);
+    if (remainingMs === 0) throw callDeadlineExceeded(endpoint);
+    const attemptTimeoutMs = Math.min(timeoutMs, remainingMs);
 
     const url = this.buildUrl(endpoint, params);
     // The endpoint only: the full URL carries caller-supplied query values into the log record.
@@ -210,10 +340,9 @@ export class NvdHttpClient {
     this.lastRequestAt = Date.now();
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    // Chain caller's signal
+    const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
     const onAbort = () => controller.abort();
-    ctx.signal.addEventListener('abort', onAbort, { once: true });
+    signal.addEventListener('abort', onAbort, { once: true });
 
     try {
       const response = await fetch(url.toString(), {
@@ -245,27 +374,36 @@ export class NvdHttpClient {
       }
 
       if (!response.ok) {
-        throw serviceUnavailable(`NVD API returned HTTP ${response.status}.`, {
-          endpoint,
-          status: response.status,
-        });
+        /**
+         * Only a 5xx says NVD itself is failing, so only a 5xx tells the caller to wait and retry.
+         * Any other unexpected status stays unclassified: waiting cannot be shown to fix it.
+         */
+        throw serviceUnavailable(
+          `NVD API returned HTTP ${response.status}.`,
+          response.status >= 500
+            ? { endpoint, status: response.status, reason: UNAVAILABLE_REASON, retryable: true }
+            : { endpoint, status: response.status },
+        );
       }
 
       return await response.text();
     } catch (err) {
-      if (ctx.signal.aborted)
-        throw requestCancelled('NVD request cancelled by caller.', undefined, { cause: err });
+      if (ctx.signal.aborted) throw requestCancelled(CANCELLED_MESSAGE, undefined, { cause: err });
       if (controller.signal.aborted)
-        throw timeout(`NVD request timed out after ${timeoutMs}ms.`, undefined, { cause: err });
+        throw timeout(
+          `NVD request timed out after ${attemptTimeoutMs}ms.`,
+          { reason: TIMEOUT_REASON, endpoint, retryable: true },
+          { cause: err },
+        );
       if (err instanceof McpError) throw err;
       throw serviceUnavailable(
         'NVD API network request or response body failed.',
-        { endpoint },
+        { endpoint, reason: UNAVAILABLE_REASON, retryable: true },
         { cause: err },
       );
     } finally {
       clearTimeout(timer);
-      ctx.signal.removeEventListener('abort', onAbort);
+      signal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -283,7 +421,7 @@ export class NvdHttpClient {
         endpoint,
         retryable: false,
         recovery: {
-          hint: `NVD refused the NVD_API_KEY value. Verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at ${RATE_LIMIT_WITHOUT_KEY} req/${windowSec}s.`,
+          hint: `NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at ${RATE_LIMIT_WITHOUT_KEY} req/${windowSec}s.`,
         },
       });
     }
@@ -309,7 +447,7 @@ export class NvdHttpClient {
       recovery: {
         hint: this.apiKey
           ? `The NVD rate limit was exceeded (${RATE_LIMIT_WITH_KEY} req/${windowSec}s with an API key). Wait ${retryAfter}s for the window to reset, or reduce concurrent calls.`
-          : `The NVD rate limit was exceeded (${RATE_LIMIT_WITHOUT_KEY} req/${windowSec}s without an API key). Set NVD_API_KEY to raise it to ${RATE_LIMIT_WITH_KEY} req/${windowSec}s, or wait ${retryAfter}s for the window to reset.`,
+          : `The NVD rate limit was exceeded (${RATE_LIMIT_WITHOUT_KEY} req/${windowSec}s without an API key). Wait ${retryAfter}s for the window to reset; a server operator can set NVD_API_KEY to raise the limit to ${RATE_LIMIT_WITH_KEY} req/${windowSec}s.`,
       },
     });
   }

@@ -164,10 +164,9 @@ describe('NVD validated response boundaries', () => {
   it('negative-caches invalid source envelopes and retries after the failure TTL', async () => {
     const fetch = respond({ message: 'wrong envelope' });
     const service = new NvdSourceService({} as never, {} as never);
-    const ctx = createMockContext();
-    expect((await service.getResolver(ctx))('opaque')).toBe('opaque');
+    expect((await service.getResolver(createMockContext()))('opaque')).toBe('opaque');
     await vi.advanceTimersByTimeAsync(300_001);
-    await service.getResolver(ctx);
+    await service.getResolver(createMockContext());
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

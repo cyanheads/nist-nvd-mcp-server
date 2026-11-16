@@ -13,6 +13,12 @@ import { parseNvdResponse } from '../nvd-http/parse-nvd-response.js';
 import type { CpeRecord, RawCpeItem, RawCpeResponse } from './types.js';
 import { rawCpeResponseSchema } from './types.js';
 
+/**
+ * NVD's `message` when the match string itself is the rejected parameter (live API, with or
+ * without a keyword beside it: `Invalid cpeMatchstring parameter, see documentation.`).
+ */
+const CPE_PARAMETER_REJECTED = /\bcpeMatchString\b/i;
+
 /** Normalize a raw CPE item to a CpeRecord. */
 function normalizeCpe(raw: RawCpeItem): CpeRecord {
   const title = raw.titles?.find((entry) => entry.lang === 'en' && entry.title)?.title;
@@ -70,9 +76,14 @@ export class NvdCpeService {
        * The tool's prefix check clears any string starting `cpe:2.3:`, but NVD rejects a pattern
        * carrying genuinely malformed characters with a 404. A merely truncated prefix is a
        * legitimate partial match here and comes back as an empty HTTP 200, so only the rejection
-       * means the string itself is at fault.
+       * means the string itself is at fault — and only a rejection NVD's message pins on it. One
+       * naming another parameter, or none, keeps `nvd_request_rejected` and NVD's own diagnosis.
        */
-      if (params.cpeMatchString && isNvdRequestRejected(err)) {
+      if (
+        params.cpeMatchString &&
+        isNvdRequestRejected(err) &&
+        CPE_PARAMETER_REJECTED.test(err.message)
+      ) {
         throw validationError(
           `Invalid CPE string "${params.cpeMatchString}". ${err.message}`,
           { reason: 'invalid_cpe_format', cpe: params.cpeMatchString },

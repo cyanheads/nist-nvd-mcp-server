@@ -132,6 +132,15 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
         'Provide a valid CPEv2.3 string starting with "cpe:2.3:", or use keyword search to find the correct CPE name.',
     },
     {
+      reason: 'nvd_request_rejected',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'NVD rejected a request parameter other than the cpeMatchString, or rejected the request without naming a parameter.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery:
+        'Fix the parameter NVD names in the message. If it names none, retry with a simpler keyword, or check cpeMatchString against a known prefix such as cpe:2.3:a:apache:http_server.',
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: 'NVD explicitly reported that the rate limit was exceeded.',
@@ -139,7 +148,36 @@ export const nvdSearchCpes = tool('nvd_search_cpes', {
       /** Raised by the HTTP client on NVD's 403, below this handler. */
       thrownBy: 'service',
       recovery:
-        'Wait for the NVD rate window to reset or set the NVD_API_KEY environment variable for higher limits.',
+        'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    },
+    {
+      reason: 'nvd_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'NVD answered with HTTP 5xx, or the request or its response failed on the network, after the client retried.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery: 'NVD is failing or unreachable; wait a minute and retry the call.',
+    },
+    {
+      reason: 'nvd_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'An NVD request outlived its timeout, or the call ran out of its 55-second deadline.',
+      retryable: true,
+      /** Raised by the HTTP client, below this handler. */
+      thrownBy: 'service',
+      recovery:
+        'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    },
+    {
+      reason: 'nvd_invalid_api_key',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: "NVD refused the server's configured NVD_API_KEY.",
+      retryable: false,
+      /** Raised by the HTTP client, below this handler, carrying this same hint. */
+      thrownBy: 'service',
+      recovery:
+        "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
     },
   ],
 

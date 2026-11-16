@@ -6,15 +6,20 @@
  * @module tests/services/nvd-source-service.test
  */
 
-import { requestCancelled, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  requestCancelled,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NvdCveService } from '@/services/nvd-cve/nvd-cve-service.js';
-import type { RawCveResponse } from '@/services/nvd-cve/types.js';
+import type { CveRecord, RawCveResponse } from '@/services/nvd-cve/types.js';
 import * as nvdHttpClientModule from '@/services/nvd-http/nvd-http-client.js';
 import {
   initNvdSourceService,
   NvdSourceService,
+  type SourceNameResolver,
 } from '@/services/nvd-source/nvd-source-service.js';
 import type { RawNvdSourceResponse } from '@/services/nvd-source/types.js';
 import { at } from '../support/at.js';
@@ -237,17 +242,19 @@ describe('NvdSourceService — source identifier resolution', () => {
     expect(Number(params.resultsPerPage)).toBeLessThanOrEqual(1000);
   });
 
-  it('spends less effort on the dictionary than on the record it decorates', async () => {
+  it('gives the dictionary one 20 s attempt rather than a retry ladder', async () => {
     await new NvdSourceService({} as never, {} as never).getResolver(createMockContext());
 
     const call = client.get.mock.calls.find(([endpoint]) => endpoint === 'source/2.0');
     const budget = call?.[3];
     /**
      * The load sits inside the calling tool and shares one pacing queue with the CVE requests, so
-     * an unreachable endpoint must cost a single short wait — not attempts × timeout × backoff.
+     * an unreachable endpoint must cost a single wait — not attempts × timeout × backoff. The wait
+     * is long enough for `source/2.0` at ordinary NVD latency; the client caps it by what remains
+     * of the call's deadline.
      */
     expect(budget?.maxRetries).toBe(0);
-    expect(budget?.timeoutMs).toBeLessThanOrEqual(3_000);
+    expect(budget?.timeoutMs).toBe(20_000);
   });
 
   it('warns and resolves the rest raw when the dictionary page is truncated', async () => {
@@ -292,5 +299,219 @@ describe('NvdSourceService — source identifier resolution', () => {
     );
 
     expect(client.sourceCalls()).toBe(0);
+  });
+});
+
+/** The one deadline every NVD request a tool call makes settles inside, from the call's start. */
+const CALL_DEADLINE_MS = 55_000;
+const CISA_ADP_GUID = '134c704f-9b21-4f2e-91b3-4a467353bcc0';
+
+/** How one stubbed request answers: given its abort signal, the response it settles with. */
+type Answer = (signal: AbortSignal | undefined) => Promise<Response>;
+
+/** Answers with `body` after `ms`, unless the request aborts first. */
+function answerAfter(ms: number, body: unknown): Answer {
+  return (signal) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body))), ms);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException('Aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+}
+
+/** Never answers: the request settles only when it aborts. */
+const silent: Answer = (signal) =>
+  new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+      once: true,
+    });
+  });
+
+/**
+ * Stub fetch by endpoint: `source` answers the `index`-th dictionary request, `cve` every CVE
+ * request. Returns the virtual-clock time each dictionary request went out.
+ */
+function routeFetch(source: (index: number) => Answer, cve: Answer = answerAfter(0, CVE_RESPONSE)) {
+  const sourceSentAt: number[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal ?? undefined;
+      if (!String(input).includes('/source/2.0')) return cve(signal);
+      sourceSentAt.push(Date.now());
+      return source(sourceSentAt.length - 1)(signal);
+    }),
+  );
+  return sourceSentAt;
+}
+
+/** Records the virtual-clock instant a promise settles, and what it settled with. */
+function whenSettled<T>(promise: Promise<T>): { value?: unknown; at?: number } {
+  const outcome: { value?: unknown; at?: number } = {};
+  promise.then(
+    (value) => {
+      outcome.value = value;
+      outcome.at = Date.now();
+    },
+    (err: unknown) => {
+      outcome.value = err;
+      outcome.at = Date.now();
+    },
+  );
+  return outcome;
+}
+
+/**
+ * The dictionary load through the real client and the call deadline it shares with the CVE
+ * request ahead of it: the budget, what a load cut short leaves behind, and how a call waiting on
+ * a load another call opened settles.
+ */
+describe('NvdSourceService — the dictionary load inside the call deadline', () => {
+  const service = new NvdCveService({} as never, {} as never);
+
+  function fetchFull(ctx = createMockContext()) {
+    return service.fetchById(
+      ['CVE-2024-23225'],
+      { includeReferences: true, allLanguages: false },
+      ctx,
+    );
+  }
+
+  /** The SSVC/weakness source of the one record a full fetch returns. */
+  function weaknessSource(outcome: { value?: unknown }): string {
+    return at(at((outcome.value as { cves: CveRecord[] }).cves).weaknesses).source;
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+    // Long attempts, so each case is bounded by the dictionary budget or the call deadline alone.
+    nvdHttpClientModule.initNvdHttpClient('test-api-key', 60_000);
+    initNvdSourceService({} as never, {} as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('resolves names on a cold cache when source/2.0 answers inside its 20 s', async () => {
+    const sourceSentAt = routeFetch(() => answerAfter(15_000, SOURCE_RESPONSE));
+
+    const call = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+
+    expect(weaknessSource(call)).toBe('CISA-ADP');
+    expect(sourceSentAt).toHaveLength(1);
+  });
+
+  it('keeps raw identifiers past its own 20 s timeout and remembers that failure', async () => {
+    const sourceSentAt = routeFetch(() => silent);
+
+    const first = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+
+    // One attempt of exactly the dictionary budget, and the call still succeeds.
+    expect(first.at).toBe(at(sourceSentAt) + 20_000);
+    expect(weaknessSource(first)).toBe(CISA_ADP_GUID);
+
+    // A failure of the load itself opens the failure window: the next call sends no dictionary request.
+    const second = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+    expect(weaknessSource(second)).toBe(CISA_ADP_GUID);
+    expect(sourceSentAt).toHaveLength(1);
+  });
+
+  it('leaves the cache as it was when the call deadline cuts the load short', async () => {
+    // The CVE request takes 50 s, leaving the dictionary 5 s of the call rather than its own 20 s.
+    const sourceSentAt = routeFetch(
+      (index) => (index === 0 ? silent : answerAfter(0, SOURCE_RESPONSE)),
+      answerAfter(50_000, CVE_RESPONSE),
+    );
+    const startedAt = Date.now();
+
+    const first = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+
+    expect(first.at).toBe(startedAt + CALL_DEADLINE_MS);
+    expect(weaknessSource(first)).toBe(CISA_ADP_GUID);
+
+    // Running out of call time says nothing about NVD's health, so the next call loads again.
+    const second = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+    expect(sourceSentAt).toHaveLength(2);
+    expect(weaknessSource(second)).toBe('CISA-ADP');
+  });
+
+  it('settles a call waiting on a load another call cancelled with the names already cached', async () => {
+    const sourceSentAt = routeFetch((index) =>
+      index === 0 ? silent : answerAfter(0, SOURCE_RESPONSE),
+    );
+    const sources = new NvdSourceService({} as never, {} as never);
+    const opener = new AbortController();
+
+    const opened = whenSettled(sources.getResolver(createMockContext({ signal: opener.signal })));
+    const waiting = whenSettled(sources.getResolver(createMockContext()));
+    await vi.advanceTimersByTimeAsync(1_000);
+    const cancelledAt = Date.now();
+    opener.abort();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(opened.value).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    // The waiter was never cancelled, so it is never failed: it proceeds on the cold cache.
+    expect(waiting.at).toBe(cancelledAt);
+    expect((waiting.value as SourceNameResolver)(CISA_ADP_GUID)).toBe(CISA_ADP_GUID);
+
+    // The cancelled load left the cache cold rather than remembered as an outage.
+    const next = whenSettled(sources.getResolver(createMockContext()));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sourceSentAt).toHaveLength(2);
+    expect((next.value as SourceNameResolver)(CISA_ADP_GUID)).toBe('CISA-ADP');
+  });
+
+  it('stops a call waiting on a load another call opened at its own deadline', async () => {
+    const sourceSentAt = routeFetch(() => answerAfter(15_000, SOURCE_RESPONSE));
+    const sources = new NvdSourceService({} as never, {} as never);
+    // This call has already spent 50 s when another call opens the load.
+    const waiterCtx = createMockContext();
+    const waiterStartedAt = Date.now();
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    const opened = whenSettled(sources.getResolver(createMockContext()));
+    const waiting = whenSettled(sources.getResolver(waiterCtx));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(waiting.at).toBe(waiterStartedAt + CALL_DEADLINE_MS);
+    expect((waiting.value as SourceNameResolver)(CISA_ADP_GUID)).toBe(CISA_ADP_GUID);
+    // The load runs on to the deadline of the call that opened it.
+    expect(opened.at).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+    expect((opened.value as SourceNameResolver)(CISA_ADP_GUID)).toBe('CISA-ADP');
+    expect(sourceSentAt).toHaveLength(1);
+  });
+
+  it('settles a waiting call at once on its own cancellation and leaves the load to its opener', async () => {
+    const sourceSentAt = routeFetch(() => answerAfter(15_000, SOURCE_RESPONSE));
+    const sources = new NvdSourceService({} as never, {} as never);
+    const waiter = new AbortController();
+
+    const opened = whenSettled(sources.getResolver(createMockContext()));
+    const waiting = whenSettled(sources.getResolver(createMockContext({ signal: waiter.signal })));
+    await vi.advanceTimersByTimeAsync(1_000);
+    const cancelledAt = Date.now();
+    waiter.abort();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(waiting.at).toBe(cancelledAt);
+    expect(waiting.value).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+    expect((opened.value as SourceNameResolver)(CISA_ADP_GUID)).toBe('CISA-ADP');
+    expect(sourceSentAt).toHaveLength(1);
   });
 });

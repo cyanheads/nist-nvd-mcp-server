@@ -3,7 +3,7 @@
  * @module tests/tools/nvd-search-cpes.tool.test
  */
 
-import { forbidden, JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nvdSearchCpes } from '@/mcp-server/tools/definitions/nvd-search-cpes.tool.js';
@@ -38,30 +38,57 @@ describe('nvdSearchCpes response and rendering contracts', () => {
     [
       'nvd_invalid_response',
       JsonRpcErrorCode.ServiceUnavailable,
+      false,
       'Try again later; if the failure persists, report the failing tool call.',
     ],
     [
       'nvd_request_blocked',
       JsonRpcErrorCode.Forbidden,
+      false,
       'Rephrase query text, or try again later or from another network.',
     ],
-  ] as const)('fills %s recovery on both surfaces', async (reason, code, hint) => {
-    const error =
-      reason === 'nvd_invalid_response'
-        ? serviceUnavailable('Unusable response', { reason, retryable: false })
-        : forbidden('Blocked request', { reason, retryable: false });
+    [
+      'rate_limited',
+      JsonRpcErrorCode.RateLimited,
+      true,
+      'Wait for the NVD rate window to reset, then retry; a server operator can set NVD_API_KEY for higher limits.',
+    ],
+    [
+      'nvd_unavailable',
+      JsonRpcErrorCode.ServiceUnavailable,
+      true,
+      'NVD is failing or unreachable; wait a minute and retry the call.',
+    ],
+    [
+      'nvd_timeout',
+      JsonRpcErrorCode.Timeout,
+      true,
+      'NVD did not answer in time; retry in a minute. A server operator can raise NVD_REQUEST_TIMEOUT_MS.',
+    ],
+    [
+      'nvd_invalid_api_key',
+      JsonRpcErrorCode.ConfigurationError,
+      false,
+      "NVD refused this server's NVD_API_KEY, so no NVD call can succeed until a server operator fixes it: verify the key, request a replacement at https://nvd.nist.gov/developers/request-an-api-key, or unset NVD_API_KEY to run keyless at 5 req/30s.",
+    ],
+  ] as const)('fills %s recovery on both surfaces', async (reason, code, retryable, hint) => {
     vi.spyOn(nvdCpeServiceModule, 'getNvdCpeService').mockReturnValue({
-      searchCpes: vi.fn().mockRejectedValue(error),
+      searchCpes: vi
+        .fn()
+        .mockRejectedValue(new McpError(code, 'NVD request failed.', { reason, retryable })),
     } as never);
     const result = await runToolContract(nvdSearchCpes, { keyword: 'test' });
     expect(result.structuredContent).toMatchObject({
-      error: { code, data: { reason, retryable: false, recovery: { hint } } },
+      error: { code, data: { reason, retryable, recovery: { hint } } },
     });
     expect(result.content).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'text', text: expect.stringContaining(hint) }),
       ]),
     );
+    expect(nvdSearchCpes.errors?.find((entry) => entry.reason === reason)).toMatchObject({
+      retryable,
+    });
   });
 
   it('keeps literal Markdown and every raw product field on both surfaces', async () => {
@@ -462,4 +489,53 @@ describe('nvdSearchCpes — NVD CPE rejection carries the declared contract (iss
     expect(entry?.when).toContain('cpe:2.3:');
     expect(entry?.when).toContain('NVD rejected');
   });
+
+  /**
+   * A rejection NVD does not pin on the match string reaches the caller as the declared
+   * `nvd_request_rejected`, carrying NVD's diagnosis and the declared recovery, whether or not a
+   * match string was sent beside the keyword.
+   */
+  it.each([
+    [
+      'a keyword alone, NVD naming no parameter',
+      { keyword: 'apache' },
+      undefined,
+      'NVD rejected the request parameters (HTTP 404).',
+    ],
+    [
+      'a keyword beside a match string, NVD naming the keyword',
+      { keyword: 'apache', cpeMatchString: 'cpe:2.3:a:apache:http_server' },
+      'Invalid keywordSearch parameter, see documentation.',
+      'Invalid keywordSearch parameter, see documentation.',
+    ],
+  ])(
+    'surfaces a rejection of %s as the declared nvd_request_rejected',
+    async (_case, input, detail, message) => {
+      vi.spyOn(nvdHttpClientModule, 'getNvdHttpClient').mockReturnValue({
+        get: vi.fn().mockRejectedValue(nvdHttpClientModule.nvdRequestRejected('cpes/2.0', detail)),
+      } as unknown as ReturnType<typeof nvdHttpClientModule.getNvdHttpClient>);
+
+      const result = await runToolContract(nvdSearchCpes, input);
+      const text = result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      const hint = 'Fix the parameter NVD names in the message.';
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'nvd_request_rejected',
+            retryable: false,
+            recovery: { hint: expect.stringContaining(hint) },
+          },
+        },
+      });
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).not.toContain('Invalid CPE string');
+    },
+  );
 });

@@ -18,7 +18,9 @@ const ServerConfigSchema = z.object({
   requestTimeoutMs: z.coerce
     .number()
     .default(10_000)
-    .describe('HTTP request timeout in milliseconds. Default: 10000 (10s).'),
+    .describe(
+      "Timeout for each NVD request attempt in milliseconds. Default: 10000 (10s). Every attempt is also capped by what remains of the tool call's 55s deadline, so raising it lengthens attempts, never the call.",
+    ),
   clampLimits: z
     .stringbool()
     .default(true)

@@ -392,4 +392,44 @@ describe('NvdCpeService.searchCpes — NVD CPE parameter rejection (issue #45)',
       data: { reason: 'nvd_request_rejected' },
     });
   });
+
+  /** Live: with a keyword beside a malformed match string, NVD still names the match string. */
+  it('translates a rejection naming cpeMatchString when a keyword rides along', async () => {
+    mockClient.get.mockRejectedValue(
+      nvdHttpClientModule.nvdRequestRejected(
+        'cpes/2.0',
+        'Invalid cpeMatchstring parameter, see documentation.',
+      ),
+    );
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+
+    await expect(
+      service.searchCpes(
+        { keyword: 'apache', cpeMatchString: 'cpe:2.3:a:zzz notavendor:%%%:' },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_cpe_format' } });
+  });
+
+  /**
+   * With a keyword beside the match string, NVD's 404 can be about either one, and only its
+   * message tells them apart. One naming another parameter, or none, is not pinned on the CPE.
+   */
+  it.each([
+    ['names the keyword', 'Invalid keywordSearch parameter, see documentation.'],
+    ['names no parameter', undefined],
+  ])('keeps a rejection that %s as nvd_request_rejected', async (_case, detail) => {
+    mockClient.get.mockRejectedValue(nvdHttpClientModule.nvdRequestRejected('cpes/2.0', detail));
+    const ctx = createMockContext({ errors: nvdSearchCpes.errors });
+
+    for (const params of [
+      { keyword: 'apache', cpeMatchString: 'cpe:2.3:a:apache:http_server' },
+      { cpeMatchString: 'cpe:2.3:a:apache:http_server' },
+    ]) {
+      const failure = service.searchCpes(params, ctx);
+      await expect(failure).rejects.toMatchObject({ data: { reason: 'nvd_request_rejected' } });
+      await expect(failure).rejects.toThrow(detail ?? 'NVD rejected the request parameters');
+      await expect(failure).rejects.not.toThrow('Invalid CPE string');
+    }
+  });
 });
