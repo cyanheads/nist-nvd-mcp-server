@@ -449,6 +449,26 @@ describe('NvdSourceService — the dictionary load inside the call deadline', ()
     expect(weaknessSource(second)).toBe('CISA-ADP');
   });
 
+  it('reads a deadline-cut load as cut when the deadline fires a millisecond before the clock reaches it', async () => {
+    const sourceSentAt = routeFetch(
+      (index) => (index === 0 ? silent : answerAfter(0, SOURCE_RESPONSE)),
+      answerAfter(50_000, CVE_RESPONSE),
+    );
+
+    const first = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(50_001);
+    expect(sourceSentAt).toHaveLength(1);
+    // Node fires a timer up to 1 ms before Date.now() reaches its target: replay that once the load's deadline timers are armed.
+    vi.setSystemTime(Date.now() - 1);
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS - 50_001);
+    expect(weaknessSource(first)).toBe(CISA_ADP_GUID);
+
+    const second = whenSettled(fetchFull());
+    await vi.advanceTimersByTimeAsync(CALL_DEADLINE_MS);
+    expect(sourceSentAt).toHaveLength(2);
+    expect(weaknessSource(second)).toBe('CISA-ADP');
+  });
+
   it('settles a call waiting on a load another call cancelled with the names already cached', async () => {
     const sourceSentAt = routeFetch((index) =>
       index === 0 ? silent : answerAfter(0, SOURCE_RESPONSE),

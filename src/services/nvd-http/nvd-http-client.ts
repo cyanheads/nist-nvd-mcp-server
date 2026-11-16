@@ -44,6 +44,13 @@ const MAX_RETRIES_WITHOUT_KEY = 1;
  */
 const CALL_DEADLINE_MS = 55_000;
 
+/**
+ * How far ahead of `Date.now()` a timer aimed at the deadline can fire: Node's loop clock and
+ * `Date.now()` count whole milliseconds out of phase, so a deadline timer can run with 1 ms still
+ * on `Date.now()`'s side of it.
+ */
+const DEADLINE_TIMER_SKEW_MS = 1;
+
 /** `data.reason` on the error thrown when NVD rejects a request's parameters with HTTP 404. */
 const REQUEST_REJECTED_REASON = 'nvd_request_rejected';
 
@@ -111,9 +118,14 @@ export function isNvdRequestRejected(err: unknown): err is McpError {
  * makes, and anything it waits on; 0 once spent. It counts from the call's own start — the
  * `timestamp` the framework stamps on the call's context — so a second request, or a wait on a
  * load another call opened, gets only what the first left.
+ *
+ * Read as a deadline timer fires, the clock can still show {@link DEADLINE_TIMER_SKEW_MS} left, so
+ * that much counts as spent: a turn that comes then sends nothing, and a load the deadline cut is
+ * not mistaken for an NVD failure.
  */
 export function remainingCallMs(ctx: Context): number {
-  return Math.max(0, Date.parse(ctx.timestamp) + CALL_DEADLINE_MS - Date.now());
+  const remainingMs = Date.parse(ctx.timestamp) + CALL_DEADLINE_MS - Date.now();
+  return remainingMs > DEADLINE_TIMER_SKEW_MS ? remainingMs : 0;
 }
 
 /**

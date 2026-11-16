@@ -706,6 +706,24 @@ describe('NvdHttpClient', () => {
     expect(mock).toHaveBeenCalledTimes(1);
   });
 
+  it('sends nothing for a turn that comes as the deadline fires a millisecond before the clock reaches it', async () => {
+    const { mock } = stubSilentFetch();
+    const client = new NvdHttpClient(API_KEY, 60_000);
+
+    const holder = whenSettled(client.get('cves/2.0', {}, createMockContext()));
+    const queued = whenSettled(client.get('cves/2.0', {}, createMockContext()));
+    // Node fires a timer up to 1 ms before Date.now() reaches its target: replay that once both deadlines are armed.
+    vi.setSystemTime(Date.now() - 1);
+    await vi.advanceTimersByTimeAsync(2 * MCP_REQUEST_DEADLINE_MS);
+
+    expect(holder.value).toMatchObject({ data: { reason: 'nvd_timeout' } });
+    expect(queued.value).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'nvd_timeout', retryable: true, endpoint: 'cves/2.0' },
+    });
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
+
   it('charges no pacing slot to an attempt that bails on its deadline', async () => {
     const { at, mock } = stubSilentFetch((index) => (index === 1 ? new Response('{}') : undefined));
     const client = new NvdHttpClient(API_KEY, 60_000);
